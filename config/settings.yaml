@@ -1,0 +1,85 @@
+# === CryptoTrade 全域設定 ===
+
+trading:
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  timeframes:
+    - 1m
+    - 5m
+    - 15m
+    - 1h
+    - 4h
+  mode: futures          # spot | futures
+  leverage: 5
+  use_testnet: true
+
+strategy:
+  # 訊號觸發門檻（滿足幾項指標才進場）
+  min_signals: 3
+  # 訊號權重
+  weights:
+    rsi: 0.20
+    bollinger: 0.15
+    macd: 0.20
+    volume: 0.15
+    multi_timeframe: 0.15
+    funding_rate: 0.15
+  # 強訊號門檻
+  strong_signal_threshold: 70
+  # 中等訊號門檻
+  medium_signal_threshold: 60
+
+  dip_buyer:
+    rsi_oversold: 30
+    rsi_15m_threshold: 35
+    volume_multiplier: 1.5
+    support_tolerance_pct: 0.5
+
+  short_seller:
+    rsi_overbought: 70
+    rsi_15m_threshold: 65
+    funding_rate_high: 0.05
+    resistance_tolerance_pct: 0.5
+
+risk:
+  # 停利設定
+  take_profit:
+    level_1_pct: 1.0
+    level_1_close_pct: 40
+    level_2_pct: 2.0
+    level_2_close_pct: 30
+    level_3_pct: 3.5
+    level_3_close_pct: 30
+  # 移動停利
+  trailing_stop:
+    activation_pct: 1.5
+    callback_pct: 0.5
+  # 時間停利（秒）
+  time_stop_seconds: 1800
+  # 停損
+  stop_loss_pct: 2.0
+  # 資金管理
+  max_position_pct: 10
+  max_concurrent_positions: 3
+  max_daily_loss_pct: 3.0
+  max_daily_trades: 20
+  # 分批建倉
+  entry_batches:
+    - pct: 30
+      offset: 0.0
+    - pct: 30
+      offset: -1.0
+    - pct: 40
+      offset: -2.0
+
+notification:
+  enabled: true
+  telegram: true
+
+database:
+  url: "sqlite+aiosqlite:///cryptotrade.db"
+
+logging:
+  level: INFO
+  file: logs/cryptotrade.log
