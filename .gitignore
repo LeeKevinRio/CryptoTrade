@@ -20,6 +20,10 @@ venv/
 backtest/data/*.csv
 *.db
 
+# Logs
+logs/
+*.log
+
 # OS
 .DS_Store
 Thumbs.db

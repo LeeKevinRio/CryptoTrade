@@ -227,10 +227,6 @@ async def main():
 
     bot = CryptoTradeBot(config)
 
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
-
     try:
         await bot.start()
     except KeyboardInterrupt:

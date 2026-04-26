@@ -55,25 +55,37 @@ class WebSocketFeed:
             while True:
                 try:
                     msg = await stream.recv()
-                    if msg and "k" in msg:
-                        kline = msg["k"]
-                        data = {
-                            "symbol": kline["s"],
-                            "interval": kline["i"],
-                            "open": float(kline["o"]),
-                            "high": float(kline["h"]),
-                            "low": float(kline["l"]),
-                            "close": float(kline["c"]),
-                            "volume": float(kline["v"]),
-                            "is_closed": kline["x"],
-                            "timestamp": kline["t"],
-                        }
-                        for cb in self._callbacks["kline"]:
-                            await cb(data) if asyncio.iscoroutinefunction(cb) else cb(data)
+                    if not isinstance(msg, dict):
+                        continue
+
+                    # 處理可能的 wrapper 格式 {"stream": ..., "data": {...}}
+                    if "data" in msg and isinstance(msg["data"], dict):
+                        msg = msg["data"]
+
+                    if "k" not in msg:
+                        continue
+
+                    kline = msg["k"]
+                    if not isinstance(kline, dict):
+                        continue
+
+                    data = {
+                        "symbol": kline.get("s", symbol),
+                        "interval": kline.get("i", interval),
+                        "open": float(kline["o"]),
+                        "high": float(kline["h"]),
+                        "low": float(kline["l"]),
+                        "close": float(kline["c"]),
+                        "volume": float(kline["v"]),
+                        "is_closed": kline.get("x", False),
+                        "timestamp": kline["t"],
+                    }
+                    for cb in self._callbacks["kline"]:
+                        await cb(data) if asyncio.iscoroutinefunction(cb) else cb(data)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.error("K線串流錯誤: %s", e)
+                    logger.error("K線串流錯誤: %s (msg=%s)", e, str(msg)[:200])
                     await asyncio.sleep(1)
 
     async def _depth_loop(self, symbol: str):

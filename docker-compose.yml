@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  cryptotrade-bot:
+    build: .
+    container_name: cryptotrade-bot
+    restart: always
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    env_file:
+      - .env
