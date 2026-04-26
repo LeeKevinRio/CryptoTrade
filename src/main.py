@@ -1,8 +1,7 @@
 """CryptoTrade 主程式 — 幣安自動交易機器人"""
 
 import asyncio
-import signal
-import sys
+from datetime import datetime, timezone
 
 from src.data.binance_client import BinanceAPI
 from src.data.websocket_feed import WebSocketFeed
@@ -16,6 +15,9 @@ from src.notification.notifier import TelegramNotifier
 from src.utils.config import load_config
 from src.utils.models import init_db
 from src.utils.logger import setup_logger
+from src.web.app import create_app, serve as serve_web
+from src.web.event_bus import bus
+from src.web.state import state
 
 logger = setup_logger("main")
 
@@ -87,6 +89,14 @@ class CryptoTradeBot:
         balance = await self.api.get_usdt_balance()
         logger.info("帳戶 USDT 餘額: %.2f", balance)
 
+        # 寫入共享 state（供 Web 讀取）
+        state.bot_ref = self
+        state.testnet = self.config["binance"]["testnet"]
+        state.symbols = self.symbols
+        state.timeframes = self.timeframes
+        state.balance = balance
+        state.started_at = datetime.now(timezone.utc).isoformat()
+
         await self.notifier.send(
             f"🚀 *CryptoTrade Bot 已啟動*\n"
             f"交易對: {', '.join(self.symbols)}\n"
@@ -133,6 +143,10 @@ class CryptoTradeBot:
 
         self.candle_manager.update_candle(symbol, interval, data)
 
+        # 更新即時價格 + 推送
+        state.last_prices[symbol] = data["close"]
+        await bus.publish("kline", data)
+
         # 只在 K 線收盤時評估訊號（避免過度交易）
         if not data["is_closed"]:
             return
@@ -156,19 +170,33 @@ class CryptoTradeBot:
         # 策略評估
         signal = self.aggregator.evaluate(symbol, candles, funding_rate)
 
+        # 推送訊號（無論是否進場）
+        signal_payload = {
+            "symbol": symbol,
+            "type": signal.type.value,
+            "strength": signal.strength,
+            "actionable": signal.is_actionable,
+            "reasons": signal.reasons[:5],
+        }
+        state.last_signals[symbol] = signal_payload
+        await bus.publish("signal", signal_payload)
+
         if signal.is_actionable:
             logger.info(
                 "📍 訊號: %s %s 強度=%.1f",
                 signal.type.value, symbol, signal.strength,
             )
+            if state.paused:
+                logger.info("Bot 已暫停進場，跳過訊號")
+                return
             await self._handle_signal(signal)
 
     async def _handle_signal(self, signal):
         """處理交易訊號"""
         try:
             balance = await self.api.get_usdt_balance()
+            state.balance = balance
 
-            # 取得主要時框的 K 線（用於 ATR 計算）
             main_df = self.candle_manager.get_candles(signal.symbol, "5m")
 
             result = await self.executor.execute_signal(
@@ -180,6 +208,7 @@ class CryptoTradeBot:
             if result:
                 self.tracker.record_open(result)
                 await self.notifier.notify_open(result)
+                await bus.publish("order_open", result)
 
         except Exception as e:
             logger.error("處理訊號失敗: %s", e)
@@ -212,6 +241,7 @@ class CryptoTradeBot:
                                     pnl_pct=result["pnl_pct"],
                                 )
                                 await self.notifier.notify_close(result)
+                                await bus.publish("order_close", result)
 
             except Exception as e:
                 logger.error("風控監控錯誤: %s", e)
@@ -227,10 +257,26 @@ async def main():
 
     bot = CryptoTradeBot(config)
 
+    # Web Dashboard
+    web_cfg = config.get("web", {})
+    web_enabled = web_cfg.get("enabled", True)
+    web_host = web_cfg.get("host", "0.0.0.0")
+    web_port = int(web_cfg.get("port", 8000))
+
+    if web_enabled:
+        app = create_app(tracker=bot.tracker)
+        web_task = asyncio.create_task(serve_web(app, host=web_host, port=web_port))
+        logger.info("Web Dashboard: http://%s:%d", web_host, web_port)
+    else:
+        web_task = None
+
     try:
         await bot.start()
     except KeyboardInterrupt:
         await bot.stop()
+    finally:
+        if web_task:
+            web_task.cancel()
 
 
 if __name__ == "__main__":
