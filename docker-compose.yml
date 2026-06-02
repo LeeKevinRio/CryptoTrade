@@ -6,7 +6,7 @@ services:
     container_name: cryptotrade-bot
     restart: always
     ports:
-      - "8000:8000"
+      - "8788:8788"
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data

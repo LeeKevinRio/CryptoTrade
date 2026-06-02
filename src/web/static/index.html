@@ -9,12 +9,17 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div id="app">
+  <div id="app" :class="'theme-' + activeTab">
     <header class="topbar">
       <div class="brand">
         <span class="logo">⚡</span>
         <span>CryptoTrade Dashboard</span>
       </div>
+      <nav class="tabs">
+        <button class="tab" :class="{active: activeTab==='overview'}" @click="activeTab='overview'">總覽</button>
+        <button class="tab tab-spot" :class="{active: activeTab==='spot'}" @click="setTab('spot')">現貨</button>
+        <button class="tab tab-futures" :class="{active: activeTab==='futures'}" @click="setTab('futures')">合約</button>
+      </nav>
       <div class="status-pills">
         <span class="pill" :class="status.testnet ? 'pill-warn' : 'pill-danger'">
           {{ status.testnet ? 'TESTNET' : 'LIVE' }}
@@ -22,82 +27,116 @@
         <span class="pill" :class="wsConnected ? 'pill-ok' : 'pill-danger'">
           {{ wsConnected ? '● 已連線' : '○ 斷線' }}
         </span>
-        <span class="pill" :class="status.paused ? 'pill-warn' : 'pill-ok'">
-          {{ status.paused ? '⏸ 已暫停' : '▶ 執行中' }}
-        </span>
-        <button v-if="!status.paused" @click="pause" class="btn btn-warn">暫停進場</button>
-        <button v-else @click="resume" class="btn btn-ok">恢復進場</button>
       </div>
     </header>
 
-    <div class="grid">
-      <!-- 左：K 線圖 -->
-      <section class="card chart-card">
+    <!-- 總覽 -->
+    <div v-show="activeTab==='overview'" class="overview-grid">
+      <section class="card big-stat-card">
+        <div class="stat-label">總權益（現貨 + 合約）</div>
+        <div class="stat-value">{{ overview.total_balance?.toFixed(2) ?? '—' }} USDT</div>
+        <div class="stat-pnl" :class="(overview.today?.pnl ?? 0) >= 0 ? 'pnl-up' : 'pnl-down'">
+          今日 {{ (overview.today?.pnl ?? 0) >= 0 ? '+' : '' }}{{ overview.today?.pnl?.toFixed(2) ?? '0.00' }} USDT
+          / {{ overview.today?.trades ?? 0 }} 筆 / 勝率 {{ overview.today?.win_rate ?? 0 }}%
+        </div>
+      </section>
+
+      <section v-for="b in overview.bots" :key="b.bot_id" class="card overview-bot-card"
+               :class="b.mode === 'futures' ? 'theme-futures' : 'theme-spot'"
+               @click="setTab(b.bot_id)">
         <div class="card-header">
-          <h3>📈 即時 K 線</h3>
-          <select v-model="selectedSymbol" @change="loadChart">
-            <option v-for="s in status.symbols" :key="s" :value="s">{{ s }}</option>
-          </select>
-          <select v-model="selectedTimeframe" @change="loadChart">
-            <option v-for="t in status.timeframes" :key="t" :value="t">{{ t }}</option>
-          </select>
+          <h3>{{ b.mode === 'futures' ? '🐺 合約 Bot' : '🐢 現貨 Bot' }}</h3>
+          <span class="pill" :class="b.paused ? 'pill-warn' : 'pill-ok'">
+            {{ b.paused ? '⏸' : '▶' }}
+          </span>
         </div>
-        <div ref="chartContainer" class="chart-container"></div>
+        <div class="ovbot-balance">{{ b.balance?.toFixed(2) }} USDT</div>
+        <div class="ovbot-pos">{{ b.open_positions }} 個持倉</div>
+        <div class="ovbot-cta">點擊查看 →</div>
       </section>
 
-      <!-- 右上：餘額卡 -->
-      <section class="card stat-card">
-        <div class="stat-label">USDT 餘額</div>
-        <div class="stat-value">{{ status.balance?.toFixed(2) ?? '—' }}</div>
-        <div class="stat-sub">
-          今日: {{ todayStats.trades }} 筆 / 勝率 {{ todayStats.win_rate }}%
+      <section class="card perf-card">
+        <div class="card-header">
+          <h3>📊 績效總表</h3>
+          <div class="perf-period">
+            <button v-for="opt in perfPeriods" :key="opt.days ?? 'all'"
+                    class="btn btn-sm" :class="{active: perfDays === opt.days}"
+                    @click="setPerfDays(opt.days)">{{ opt.label }}</button>
+          </div>
         </div>
-        <div class="stat-pnl" :class="todayStats.pnl >= 0 ? 'pnl-up' : 'pnl-down'">
-          {{ todayStats.pnl >= 0 ? '+' : '' }}{{ todayStats.pnl?.toFixed(2) ?? '0.00' }} USDT
+
+        <div v-if="(perf.overall?.n ?? 0) > 0">
+          <div class="perf-metrics">
+            <div class="perf-metric">
+              <div class="pm-label">總損益</div>
+              <div class="pm-value" :class="pnlClass(perf.overall.total_pnl)">
+                {{ perf.overall.total_pnl >= 0 ? '+' : '' }}{{ perf.overall.total_pnl }} USDT
+              </div>
+            </div>
+            <div class="perf-metric">
+              <div class="pm-label">勝率 (勝/負)</div>
+              <div class="pm-value">{{ perf.overall.win_rate_wl }}%</div>
+              <div class="pm-sub">{{ perf.overall.wins }}勝 {{ perf.overall.losses }}負 {{ perf.overall.flats }}平</div>
+            </div>
+            <div class="perf-metric">
+              <div class="pm-label">盈虧比 payoff</div>
+              <div class="pm-value" :class="(perf.overall.payoff ?? 0) >= 1 ? 'pnl-up' : 'pnl-down'">
+                {{ perf.overall.payoff == null ? '∞' : perf.overall.payoff }}
+              </div>
+              <div class="pm-sub">+{{ perf.overall.avg_win }} / -{{ perf.overall.avg_loss }}</div>
+            </div>
+            <div class="perf-metric">
+              <div class="pm-label">獲利因子 PF</div>
+              <div class="pm-value" :class="(perf.overall.profit_factor ?? 0) >= 1 ? 'pnl-up' : 'pnl-down'">
+                {{ perf.overall.profit_factor == null ? '∞' : perf.overall.profit_factor }}
+              </div>
+            </div>
+            <div class="perf-metric">
+              <div class="pm-label">期望值/筆</div>
+              <div class="pm-value" :class="pnlClass(perf.overall.expectancy)">
+                {{ perf.overall.expectancy >= 0 ? '+' : '' }}{{ perf.overall.expectancy }}
+              </div>
+            </div>
+          </div>
+
+          <div v-if="perf.diagnosis?.length" class="perf-diag">
+            <div v-for="(d, i) in perf.diagnosis" :key="i" class="diag-line">⚠️ {{ d }}</div>
+          </div>
+
+          <div class="perf-tables">
+            <div class="perf-tbl">
+              <div class="perf-tbl-title">按交易對</div>
+              <table>
+                <thead><tr><th>交易對</th><th>筆數</th><th>勝率</th><th>損益</th></tr></thead>
+                <tbody>
+                  <tr v-for="b in perf.by_symbol" :key="b.key">
+                    <td><strong>{{ b.key }}</strong></td>
+                    <td>{{ b.n }}</td>
+                    <td>{{ b.win_rate_wl }}%</td>
+                    <td :class="pnlClass(b.total_pnl)">{{ b.total_pnl >= 0 ? '+' : '' }}{{ b.total_pnl }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="perf-tbl">
+              <div class="perf-tbl-title">按出場原因</div>
+              <table>
+                <thead><tr><th>原因</th><th>筆數</th><th>損益</th><th>平均</th></tr></thead>
+                <tbody>
+                  <tr v-for="b in perf.by_reason" :key="b.key">
+                    <td>{{ b.key }}</td>
+                    <td>{{ b.n }}</td>
+                    <td :class="pnlClass(b.total_pnl)">{{ b.total_pnl >= 0 ? '+' : '' }}{{ b.total_pnl }}</td>
+                    <td :class="pnlClass(b.avg)">{{ b.avg >= 0 ? '+' : '' }}{{ b.avg }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
+        <div v-else class="empty">此區間尚無已平倉交易</div>
       </section>
 
-      <!-- 右中：訊號燈 -->
-      <section class="card signals-card">
-        <div class="card-header"><h3>🚦 即時訊號</h3></div>
-        <div v-if="signalList.length === 0" class="empty">尚無訊號</div>
-        <div v-for="s in signalList" :key="s.symbol" class="signal-row">
-          <span class="signal-symbol">{{ s.symbol }}</span>
-          <span class="signal-light" :class="signalClass(s.type)">{{ s.type }}</span>
-          <span class="signal-strength">{{ s.strength?.toFixed(1) }}</span>
-        </div>
-      </section>
-
-      <!-- 持倉 -->
-      <section class="card positions-card">
-        <div class="card-header"><h3>💼 當前持倉</h3></div>
-        <table v-if="positions.length > 0">
-          <thead>
-            <tr>
-              <th>交易對</th><th>方向</th><th>數量</th>
-              <th>進場價</th><th>當前價</th><th>未實現 PnL</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="p in positions" :key="p.symbol">
-              <td><strong>{{ p.symbol }}</strong></td>
-              <td><span class="badge" :class="p.side === 'LONG' ? 'badge-long' : 'badge-short'">{{ p.side }}</span></td>
-              <td>{{ p.quantity }}</td>
-              <td>{{ p.entry_price }}</td>
-              <td>{{ p.current_price?.toFixed(2) }}</td>
-              <td :class="p.unrealized_pnl >= 0 ? 'pnl-up' : 'pnl-down'">
-                {{ p.unrealized_pnl >= 0 ? '+' : '' }}{{ p.unrealized_pnl }} ({{ p.unrealized_pnl_pct }}%)
-              </td>
-              <td>
-                <button @click="closePosition(p.symbol)" class="btn btn-danger btn-sm">緊急平倉</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <div v-else class="empty">目前無持倉</div>
-      </section>
-
-      <!-- 事件流 -->
       <section class="card events-card">
         <div class="card-header"><h3>📜 即時事件</h3></div>
         <div class="event-log">
@@ -108,6 +147,239 @@
           </div>
         </div>
       </section>
+    </div>
+
+    <!-- 單 bot 視圖（現貨/合約共用模板） -->
+    <div v-show="activeTab !== 'overview'" class="grid">
+      <section class="card chart-card">
+        <div class="card-header">
+          <h3>📈 即時 K 線
+            <span class="bot-badge" :class="'badge-' + activeTab">
+              {{ activeTab === 'futures' ? '合約' : '現貨' }}
+              <span v-if="activeBot?.leverage > 1">{{ activeBot.leverage }}x</span>
+            </span>
+          </h3>
+          <select v-model="selectedSymbol" @change="onSymbolChange">
+            <option v-for="s in status.symbols" :key="s" :value="s">{{ s }}</option>
+          </select>
+          <select v-model="selectedTimeframe" @change="loadChart">
+            <option v-for="t in status.timeframes" :key="t" :value="t">{{ t }}</option>
+          </select>
+          <button v-if="!activeBot?.paused" @click="pause" class="btn btn-warn btn-sm">暫停</button>
+          <button v-else @click="resume" class="btn btn-ok btn-sm">恢復</button>
+          <button v-if="status.testnet" @click="showForceModal=true" class="btn btn-danger btn-sm">強制下單</button>
+        </div>
+        <div ref="chartContainer" class="chart-container"></div>
+      </section>
+
+      <section class="card stat-card">
+        <div class="stat-label">{{ activeTab === 'futures' ? '合約' : '現貨' }} USDT 餘額</div>
+        <div class="stat-value">{{ activeBot?.balance?.toFixed(2) ?? '—' }}</div>
+        <div class="stat-sub">
+          模式: {{ activeBot?.mode }} | 槓桿: {{ activeBot?.leverage }}x
+        </div>
+        <div class="stat-pnl" :class="(todayStats.pnl ?? 0) >= 0 ? 'pnl-up' : 'pnl-down'">
+          今日 {{ (todayStats.pnl ?? 0) >= 0 ? '+' : '' }}{{ todayStats.pnl?.toFixed(2) ?? '0.00' }} USDT
+        </div>
+        <div class="stat-sub">
+          勝率 <strong>{{ todayStats.win_rate ?? 0 }}%</strong>
+          （{{ todayStats.wins ?? 0 }} / {{ todayStats.trades ?? 0 }} 筆）
+        </div>
+      </section>
+
+      <section class="card risk-card">
+        <div class="card-header">
+          <h3>🛡 今日風控預算</h3>
+          <span class="pill" :class="risk.can_trade ? 'pill-ok' : 'pill-danger'">
+            {{ risk.can_trade ? '可交易' : '已封鎖' }}
+          </span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">日虧損上限</span>
+          <span class="risk-val">{{ risk.max_daily_loss_usd?.toFixed(2) ?? '—' }} USDT ({{ risk.max_daily_loss_pct ?? 0 }}%)</span>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-fill bar-loss" :style="{width: (risk.loss_budget_used_pct || 0) + '%'}"></div>
+          <span class="bar-text">已用 {{ risk.loss_budget_used_pct ?? 0 }}%</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">每日交易次數</span>
+          <span class="risk-val">{{ risk.daily_trades ?? 0 }} / {{ risk.max_daily_trades ?? 0 }}</span>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-fill bar-trades" :style="{width: tradePctUsed + '%'}"></div>
+          <span class="bar-text">{{ tradePctUsed }}%</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">同時持倉</span>
+          <span class="risk-val">{{ risk.open_positions ?? 0 }} / {{ risk.max_concurrent ?? 0 }}</span>
+        </div>
+        <div v-if="!risk.can_trade" class="risk-reason">{{ risk.reason }}</div>
+      </section>
+
+      <section class="card indicators-card">
+        <div class="card-header">
+          <h3>📊 指標即時值 — {{ selectedSymbol || '—' }}</h3>
+          <span v-if="indicators.funding_rate !== undefined" class="funding-pill"
+                :class="indicators.funding_rate < 0 ? 'pill-ok' : (indicators.funding_rate > 0.0005 ? 'pill-danger' : 'pill')">
+            資金費率 {{ (indicators.funding_rate * 100).toFixed(4) }}%
+          </span>
+        </div>
+        <table v-if="indicatorRows.length > 0" class="ind-table">
+          <thead>
+            <tr>
+              <th>TF</th><th>價格</th><th>RSI</th><th>BB位置</th>
+              <th>MACD柱</th><th>ATR%</th><th>量倍</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in indicatorRows" :key="row.tf">
+              <td><strong>{{ row.tf }}</strong></td>
+              <td>{{ row.close?.toFixed(2) ?? '—' }}</td>
+              <td :class="rsiClass(row.tf, row.rsi)">{{ row.rsi ?? '—' }}</td>
+              <td :class="bbClass(row.bb_position)">
+                <span class="bb-bar"><span class="bb-dot" :style="{left: clampBBPos(row.bb_position) + '%'}"></span></span>
+                <span class="bb-num">{{ row.bb_position?.toFixed(2) ?? '—' }}</span>
+              </td>
+              <td :class="(row.macd_hist ?? 0) >= 0 ? 'pnl-up' : 'pnl-down'">{{ row.macd_hist?.toFixed(2) ?? '—' }}</td>
+              <td>{{ row.atr_pct ? row.atr_pct.toFixed(2) + '%' : '—' }}</td>
+              <td :class="volClass(row.volume_ratio)">{{ row.volume_ratio?.toFixed(2) ?? '—' }}×</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">指標資料載入中...</div>
+      </section>
+
+      <section class="card signals-card">
+        <div class="card-header"><h3>🚦 即時訊號</h3></div>
+        <div v-if="signalList.length === 0" class="empty">尚無訊號</div>
+        <div v-for="s in signalList" :key="s.symbol" class="signal-row">
+          <span class="signal-symbol">{{ s.symbol }}</span>
+          <span class="signal-light" :class="signalClass(s.type)">{{ s.type }}</span>
+          <span class="signal-strength">{{ s.strength?.toFixed(1) }}</span>
+        </div>
+      </section>
+
+      <section class="card positions-card">
+        <div class="card-header"><h3>💼 當前持倉</h3></div>
+        <table v-if="positions.length > 0">
+          <thead>
+            <tr>
+              <th>交易對</th><th>方向</th><th>數量</th>
+              <th>進場</th><th>現價</th><th>未實現 PnL</th>
+              <th>停損</th><th>下一停利</th>
+              <th v-if="activeTab==='futures'">爆倉價</th>
+              <th>R</th><th>持倉</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in positions" :key="p.symbol">
+              <td><strong>{{ p.symbol }}</strong></td>
+              <td><span class="badge" :class="p.side === 'LONG' ? 'badge-long' : 'badge-short'">{{ p.side }}</span></td>
+              <td>{{ p.quantity }} <span v-if="p.tp_remaining_qty_pct !== null" class="qty-sub">({{ p.tp_remaining_qty_pct }}%)</span></td>
+              <td>{{ p.entry_price }}</td>
+              <td>{{ p.current_price?.toFixed(2) }}</td>
+              <td :class="p.unrealized_pnl >= 0 ? 'pnl-up' : 'pnl-down'">
+                {{ p.unrealized_pnl >= 0 ? '+' : '' }}{{ p.unrealized_pnl }}
+                <span class="pnl-pct">({{ p.unrealized_pnl_pct }}%)</span>
+                <div v-if="p.trailing_active" class="trailing-tag">🔄 高點+{{ p.highest_pnl_pct }}%</div>
+              </td>
+              <td>
+                <div v-if="p.stop_price">
+                  {{ p.stop_price }}
+                  <div class="cell-sub pnl-down">距 {{ p.stop_distance_pct }}%</div>
+                </div>
+                <div v-else>—</div>
+              </td>
+              <td>
+                <div v-if="p.next_tp">
+                  {{ p.next_tp.price }} <span class="cell-sub">(+{{ p.next_tp.level_pct }}% 平{{ p.next_tp.close_pct }}%)</span>
+                  <div class="cell-sub pnl-up">距 {{ p.next_tp.distance_pct }}%</div>
+                </div>
+                <div v-else>已達頂層</div>
+              </td>
+              <td v-if="activeTab==='futures'">
+                <div v-if="p.liq_price">
+                  <span class="liq-price">{{ p.liq_price }}</span>
+                  <div class="cell-sub" :class="p.liq_distance_pct < 5 ? 'pnl-down cell-hot' : 'pnl-down'">距 {{ p.liq_distance_pct }}%</div>
+                </div>
+                <div v-else>—</div>
+              </td>
+              <td :class="(p.r_multiple ?? 0) >= 0 ? 'pnl-up' : 'pnl-down'">
+                {{ p.r_multiple !== null ? (p.r_multiple >= 0 ? '+' : '') + p.r_multiple + 'R' : '—' }}
+              </td>
+              <td>{{ formatHold(p.hold_seconds) }}</td>
+              <td>
+                <button @click="closePosition(p.symbol)" class="btn btn-danger btn-sm">平倉</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">目前無持倉</div>
+      </section>
+
+      <section class="card history-card">
+        <div class="card-header"><h3>📋 歷史紀錄（最近 10 筆）</h3></div>
+        <table v-if="recentTrades.length > 0">
+          <thead>
+            <tr>
+              <th>平倉時間</th><th>交易對</th><th>方向</th>
+              <th>進場</th><th>出場</th><th>盈虧</th><th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="t in recentTrades" :key="t.id">
+              <td>{{ fmtDateTime(t.exit_time) }}</td>
+              <td><strong>{{ t.symbol }}</strong></td>
+              <td><span class="badge" :class="t.side === 'LONG' ? 'badge-long' : 'badge-short'">{{ t.side }}</span></td>
+              <td>{{ t.entry_price }}</td>
+              <td>{{ t.exit_price ?? '—' }}</td>
+              <td :class="pnlClass(t.pnl)">
+                {{ t.pnl != null ? (t.pnl >= 0 ? '+' : '') + t.pnl : '—' }}
+                <span v-if="t.pnl_pct != null" class="pnl-pct">({{ t.pnl_pct }}%)</span>
+              </td>
+              <td class="reason-cell">{{ t.close_reason ?? '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="empty">尚無已平倉交易</div>
+      </section>
+
+      <section class="card events-card">
+        <div class="card-header"><h3>📜 即時事件</h3></div>
+        <div class="event-log">
+          <div v-for="(e, i) in filteredEvents.slice().reverse()" :key="i" class="event-line">
+            <span class="event-time">{{ e.time }}</span>
+            <span class="event-type" :class="'evt-' + e.type">{{ e.type }}</span>
+            <span class="event-msg">{{ e.msg }}</span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 強制下單 modal -->
+    <div v-if="showForceModal" class="modal-bg" @click.self="showForceModal=false">
+      <div class="modal">
+        <h3>⚠️ 強制下單測試 ({{ activeTab }})</h3>
+        <p class="modal-warn">跳過訊號條件直接下單。僅 Testnet 可用，用於驗證下單→風控→平倉管線。</p>
+        <div class="modal-row">
+          <label>交易對</label>
+          <select v-model="forceSymbol">
+            <option v-for="s in status.symbols" :key="s" :value="s">{{ s }}</option>
+          </select>
+        </div>
+        <div class="modal-row">
+          <label>方向</label>
+          <select v-model="forceSide">
+            <option value="LONG">LONG（做多）</option>
+            <option value="SHORT" :disabled="activeTab==='spot'">SHORT（做空，僅合約）</option>
+          </select>
+        </div>
+        <div class="modal-actions">
+          <button @click="showForceModal=false" class="btn btn-warn">取消</button>
+          <button @click="doForceTrade" class="btn btn-danger">確定下單</button>
+        </div>
+      </div>
     </div>
   </div>
 

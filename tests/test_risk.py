@@ -100,13 +100,29 @@ class TestStopLoss(unittest.TestCase):
         result = sl.check("ETHUSDT", 3061)
         self.assertIsNotNone(result)
 
-    def test_atr_stop(self):
+    def test_atr_stop_uses_max_when_atr_smaller(self):
+        """ATR=200 → 1.5×ATR=300 (0.6%)，固定 2%，取較寬的固定 2%"""
         sl = StopLossManager(DEFAULT_CONFIG)
         sl.set_stop("BTCUSDT", "LONG", 50000, atr=200)
         stop = sl.get_stop_price("BTCUSDT")
         self.assertIsNotNone(stop)
-        # ATR 停損距離 = 1.5 * 200 = 300, 即 0.6%，比固定 2% 窄
-        self.assertAlmostEqual(stop, 50000 - 300, places=0)
+        self.assertAlmostEqual(stop, 50000 * 0.98, places=0)  # 固定 2% 勝出
+
+    def test_atr_stop_widens_in_high_volatility(self):
+        """高 ATR 應放寬停損；ATR=2000 → 1.5×ATR=3000 (6%)，超過 max 4% 上限後封頂於 4%"""
+        sl = StopLossManager(DEFAULT_CONFIG)
+        sl.set_stop("BTCUSDT", "LONG", 50000, atr=2000)
+        stop = sl.get_stop_price("BTCUSDT")
+        self.assertIsNotNone(stop)
+        # 6% > 4% 上限 → 封頂於 4%
+        self.assertAlmostEqual(stop, 50000 * 0.96, places=0)
+
+    def test_atr_stop_within_bounds(self):
+        """ATR=1000 → 1.5×ATR=1500 (3%)，在 2% 與 4% 之間 → 用 3%"""
+        sl = StopLossManager(DEFAULT_CONFIG)
+        sl.set_stop("BTCUSDT", "LONG", 50000, atr=1000)
+        stop = sl.get_stop_price("BTCUSDT")
+        self.assertAlmostEqual(stop, 50000 * 0.97, places=0)
 
 
 class TestCapitalManager(unittest.TestCase):

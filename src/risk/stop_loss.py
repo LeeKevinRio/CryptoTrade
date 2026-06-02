@@ -12,18 +12,32 @@ class StopLossManager:
     def __init__(self, config: dict):
         risk_cfg = config.get("risk", {})
         self.fixed_stop_pct = risk_cfg.get("stop_loss_pct", 2.0)
-        self.atr_multiplier = 1.5
+        self.atr_multiplier = risk_cfg.get("atr_multiplier", 1.5)
+        # 停損絕對上限；不得低於用戶指定的固定停損，否則永遠被裁切
+        configured_max = risk_cfg.get("max_stop_pct", 4.0)
+        if configured_max < self.fixed_stop_pct:
+            logger.warning(
+                "max_stop_pct (%.1f) < stop_loss_pct (%.1f)，自動提升為固定停損值",
+                configured_max, self.fixed_stop_pct,
+            )
+            configured_max = self.fixed_stop_pct
+        self.max_stop_pct = configured_max
 
         # {symbol: {"entry_price": float, "side": str, "stop_price": float}}
         self._stops: dict[str, dict] = {}
 
     def set_stop(self, symbol: str, side: str, entry_price: float, atr: float | None = None):
         if atr and atr > 0:
-            # 動態停損：1.5 × ATR
-            stop_distance = self.atr_multiplier * atr
-            stop_pct = (stop_distance / entry_price) * 100
-            # 取固定停損與 ATR 停損中較窄者
-            effective_pct = min(self.fixed_stop_pct, stop_pct)
+            # 動態停損：固定停損 與 1.5 × ATR 取「較寬」（高波動時不被噪音打掉）
+            atr_pct = (self.atr_multiplier * atr / entry_price) * 100
+            effective_pct = max(self.fixed_stop_pct, atr_pct)
+            # ATR 算出超過上限時警告，避免使用者誤以為停損很寬
+            if atr_pct > self.max_stop_pct:
+                logger.warning(
+                    "%s ATR 停損 %.2f%% 超過上限 %.2f%%，已封頂",
+                    symbol, atr_pct, self.max_stop_pct,
+                )
+            effective_pct = min(effective_pct, self.max_stop_pct)
         else:
             effective_pct = self.fixed_stop_pct
 

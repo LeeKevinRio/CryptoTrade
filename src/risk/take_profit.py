@@ -37,11 +37,13 @@ class TakeProfitState:
     # 移動停利
     trailing_active: bool = False
     highest_pnl_pct: float = 0.0        # 持倉期間最高獲利%
+    lowest_pnl_pct: float = 0.0         # 持倉期間最低 pnl%（通常為負）
     trailing_activation_pct: float = 1.5
     trailing_callback_pct: float = 0.5
 
     # 時間停利
-    time_stop_seconds: int = 1800        # 30 分鐘
+    time_stop_seconds: int = 1800
+    time_stop_no_movement_pct: float = 0.4   # MFE/|MAE| 都 < 此值才視為無波動可平        # 30 分鐘
 
 
 class TakeProfitManager:
@@ -59,6 +61,9 @@ class TakeProfitManager:
         self.trailing_activation = trail_cfg.get("activation_pct", 1.5)
         self.trailing_callback = trail_cfg.get("callback_pct", 0.5)
         self.time_stop = config.get("risk", {}).get("time_stop_seconds", 1800)
+        self.time_stop_no_movement_pct = config.get("risk", {}).get(
+            "time_stop_no_movement_pct", 0.4,
+        )
 
         # {symbol: TakeProfitState}
         self._states: dict[str, TakeProfitState] = {}
@@ -78,6 +83,7 @@ class TakeProfitManager:
             trailing_activation_pct=self.trailing_activation,
             trailing_callback_pct=self.trailing_callback,
             time_stop_seconds=self.time_stop,
+            time_stop_no_movement_pct=self.time_stop_no_movement_pct,
         )
         self._states[symbol] = state
         logger.info(
@@ -123,6 +129,8 @@ class TakeProfitManager:
         # ── 2. 移動停利 ──
         if pnl_pct > state.highest_pnl_pct:
             state.highest_pnl_pct = pnl_pct
+        if pnl_pct < state.lowest_pnl_pct:
+            state.lowest_pnl_pct = pnl_pct
 
         if not state.trailing_active and pnl_pct >= state.trailing_activation_pct:
             state.trailing_active = True
@@ -143,18 +151,42 @@ class TakeProfitManager:
                     symbol, drawdown,
                 )
 
-        # ── 3. 時間停利 ──
+        # ── 3. 時間停利（無波動判定）──
+        # 改版理念：不再因「超時 + 小幅虧損」就硬平倉，避免把還沒走完的單砍掉
+        # 只有在超時 *且* 倉位生命週期內價格 max excursion 兩側都未達門檻時，
+        # 才視為「沒走勢、卡資金」並出場；有走勢就交給 trailing / SL / L1 處理
         if state.remaining_quantity > 0:
             elapsed = time.time() - state.entry_time
-            if elapsed > state.time_stop_seconds and pnl_pct > 0:
-                close_qty = state.remaining_quantity
-                state.remaining_quantity = 0
-                actions.append({
-                    "action": "close",
-                    "quantity": close_qty,
-                    "reason": f"時間停利: 持倉 {elapsed/60:.0f} 分鐘，獲利 +{pnl_pct:.2f}%",
-                })
-                logger.info("⏰ %s 時間停利 %.0f 分鐘", symbol, elapsed / 60)
+            if elapsed > state.time_stop_seconds:
+                l1_triggered = state.levels and state.levels[0].triggered
+                threshold = state.time_stop_no_movement_pct
+                mfe = state.highest_pnl_pct       # ≥ 0
+                mae_abs = -state.lowest_pnl_pct   # ≥ 0
+                no_movement = mfe < threshold and mae_abs < threshold
+
+                should_close = False
+                reason = ""
+                if no_movement:
+                    should_close = True
+                    reason = (
+                        f"時間停損(無波動): {elapsed/60:.0f} 分鐘內 MFE +{mfe:.2f}% / "
+                        f"MAE -{mae_abs:.2f}% 皆 < {threshold}%，pnl {pnl_pct:+.2f}%"
+                    )
+                elif l1_triggered and pnl_pct > 0:
+                    # L1 已觸發、目前仍獲利 → 動能停滯就鎖剩餘利潤
+                    should_close = True
+                    reason = f"時間停利: 持倉 {elapsed/60:.0f} 分鐘，獲利 +{pnl_pct:.2f}%"
+                # 其他情形（有走過但目前回到區間內）→ 留給 trailing / SL 處理
+
+                if should_close:
+                    close_qty = state.remaining_quantity
+                    state.remaining_quantity = 0
+                    actions.append({
+                        "action": "close",
+                        "quantity": close_qty,
+                        "reason": reason,
+                    })
+                    logger.info("⏰ %s %s", symbol, reason)
 
         return actions
 

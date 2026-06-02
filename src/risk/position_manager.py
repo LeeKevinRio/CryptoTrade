@@ -1,5 +1,6 @@
 """倉位管理 — 整合停利、停損、資金管理"""
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,7 @@ class Position:
     entry_price: float
     quantity: float
     leverage: int = 1
+    trade_id: int | None = None       # 對應 TradeRecord.id，用於精確 record_close
     batch_orders: list[dict] = field(default_factory=list)
     filled_batches: int = 0
 
@@ -31,6 +33,16 @@ class PositionManager:
         self.sl_manager = StopLossManager(config)
         self.capital_manager = CapitalManager(config)
         self._positions: dict[str, Position] = {}
+        # 每個 symbol 一把 asyncio.Lock，僅在事件迴圈中按需建立避免錯誤綁定
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
+
+    def lock_for(self, symbol: str) -> asyncio.Lock:
+        lock = self._symbol_locks.get(symbol)
+        if lock is None:
+            # 在當前 running loop 中建立，避免 defaultdict 在錯誤的 loop 上產生 lock
+            lock = asyncio.Lock()
+            self._symbol_locks[symbol] = lock
+        return lock
 
     def open_position(
         self,
@@ -40,6 +52,7 @@ class PositionManager:
         quantity: float,
         leverage: int = 1,
         atr: float | None = None,
+        trade_id: int | None = None,
     ) -> Position:
         pos = Position(
             symbol=symbol,
@@ -47,6 +60,7 @@ class PositionManager:
             entry_price=entry_price,
             quantity=quantity,
             leverage=leverage,
+            trade_id=trade_id,
         )
         self._positions[symbol] = pos
         self.capital_manager.add_position()
@@ -88,6 +102,7 @@ class PositionManager:
             "quantity": pos.quantity,
             "pnl": round(pnl, 4),
             "pnl_pct": round(pnl_pct, 2),
+            "trade_id": pos.trade_id,
         }
         logger.info(
             "平倉: %s %s pnl=%.4f (%.2f%%)",

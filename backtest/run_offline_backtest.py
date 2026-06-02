@@ -90,14 +90,51 @@ def generate_realistic_data(days: int = 30, interval_minutes: int = 5) -> pd.Dat
     return df
 
 
+def run_for_bot(bot_id: str, full_config: dict, df):
+    """為單一 bot 執行回測"""
+    bot_cfg = full_config.get("bots", {}).get(bot_id, {})
+    if not bot_cfg:
+        print(f"⚠️  config 找不到 bot: {bot_id}")
+        return None
+
+    flat_cfg = {
+        "strategy": bot_cfg.get("strategy", {}),
+        "risk": bot_cfg.get("risk", {}),
+    }
+    print(f"\n{'='*55}")
+    print(f"  🤖 [{bot_id.upper()}] mode={bot_cfg.get('mode')} "
+          f"leverage={bot_cfg.get('leverage')}x "
+          f"only_long={bot_cfg.get('only_long', False)}")
+    print(f"{'='*55}")
+    bt = Backtester(flat_cfg)
+    result = bt.run(df, "BTCUSDT")
+    bt.print_report(result)
+
+    if result.trades:
+        longs = [t for t in result.trades if t.side == "LONG"]
+        shorts = [t for t in result.trades if t.side == "SHORT"]
+        print(f"\n  📈 做多: {len(longs)} 筆", end="")
+        if longs:
+            lw = [t for t in longs if t.pnl_pct > 0]
+            print(f" | 勝率 {len(lw)/len(longs)*100:.0f}% | 總盈虧 {sum(t.pnl_pct for t in longs):+.2f}%")
+        else:
+            print()
+        print(f"  📉 做空: {len(shorts)} 筆", end="")
+        if shorts:
+            sw = [t for t in shorts if t.pnl_pct > 0]
+            print(f" | 勝率 {len(sw)/len(shorts)*100:.0f}% | 總盈虧 {sum(t.pnl_pct for t in shorts):+.2f}%")
+        else:
+            print()
+    return result
+
+
 def main():
     print("=" * 55)
-    print("  CryptoTrade 離線回測（模擬 30 天 BTC 行情）")
+    print("  CryptoTrade 離線回測（雙 bot 各跑一次）")
     print("=" * 55)
-    print()
 
     # 生成資料
-    print("📊 生成模擬行情資料...")
+    print("\n📊 生成模擬行情資料...")
     df = generate_realistic_data(days=30, interval_minutes=5)
     print(f"   資料筆數: {len(df)} 根 K 線")
     print(f"   時間範圍: {df.index[0]} ~ {df.index[-1]}")
@@ -105,50 +142,40 @@ def main():
     print(f"   結束價格: ${df['close'].iloc[-1]:,.2f}")
     price_change = (df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0] * 100
     print(f"   價格變動: {price_change:+.2f}%")
-    print(f"   最高價:   ${df['high'].max():,.2f}")
-    print(f"   最低價:   ${df['low'].min():,.2f}")
 
-    # 載入設定
     config = load_config()
 
-    # 執行回測
-    print("\n🔄 執行策略回測...")
-    bt = Backtester(config)
-    result = bt.run(df, "BTCUSDT")
+    # spot + futures 各跑一次
+    results = {}
+    for bot_id in ("spot", "futures"):
+        results[bot_id] = run_for_bot(bot_id, config, df)
 
-    # 輸出報告
-    bt.print_report(result)
-
-    # 額外統計
-    if result.trades:
-        print("\n📋 所有交易明細:")
-        print("-" * 90)
-        print(f"  {'#':>3}  {'方向':5s}  {'進場時間':19s}  {'出場時間':19s}  {'盈虧%':>8s}  {'原因'}")
-        print("-" * 90)
-        for i, t in enumerate(result.trades, 1):
-            emoji = "🟢" if t.pnl_pct > 0 else "🔴"
-            print(
-                f"  {i:3d}  {t.side:5s}  {t.entry_time[:19]:19s}  {t.exit_time[:19]:19s}  "
-                f"{emoji}{t.pnl_pct:+.2f}%   {t.reason}"
-            )
-        print("-" * 90)
-
-        # 統計多空分開的績效
-        longs = [t for t in result.trades if t.side == "LONG"]
-        shorts = [t for t in result.trades if t.side == "SHORT"]
-        print(f"\n  📈 做多交易: {len(longs)} 筆", end="")
-        if longs:
-            long_wins = [t for t in longs if t.pnl_pct > 0]
-            print(f" | 勝率 {len(long_wins)/len(longs)*100:.0f}% | 總盈虧 {sum(t.pnl_pct for t in longs):+.2f}%")
-        else:
-            print()
-        print(f"  📉 做空交易: {len(shorts)} 筆", end="")
-        if shorts:
-            short_wins = [t for t in shorts if t.pnl_pct > 0]
-            print(f" | 勝率 {len(short_wins)/len(shorts)*100:.0f}% | 總盈虧 {sum(t.pnl_pct for t in shorts):+.2f}%")
-        else:
-            print()
-
+    # 對照表
+    print("\n" + "=" * 55)
+    print("  📋 雙 bot 績效對照")
+    print("=" * 55)
+    print(f"  {'指標':<20} {'spot':>12} {'futures':>12}")
+    print("-" * 55)
+    for label, attr in [
+        ("總交易次數", "total_trades"),
+        ("勝率 %", "win_rate"),
+        ("總盈虧 %（無槓桿）", "total_pnl_pct"),
+        ("最大回撤 %", "max_drawdown_pct"),
+        ("獲利因子", "profit_factor"),
+        ("夏普比率", "sharpe_ratio"),
+    ]:
+        sv = getattr(results.get("spot"), attr, 0) if results.get("spot") else 0
+        fv = getattr(results.get("futures"), attr, 0) if results.get("futures") else 0
+        print(f"  {label:<20} {sv:>12.2f} {fv:>12.2f}")
+    print("-" * 55)
+    # 套槓桿後的合約權益曲線估算
+    if results.get("futures"):
+        fut_lev = config.get("bots", {}).get("futures", {}).get("leverage", 1)
+        print(f"\n  ⚠️  合約套用 {fut_lev}x 槓桿後的理論盈虧（假設無爆倉）：")
+        print(f"     總盈虧 ≈ {results['futures'].total_pnl_pct * fut_lev:+.2f}%")
+        print(f"     最大回撤 ≈ {results['futures'].max_drawdown_pct * fut_lev:.2f}%")
+        if results['futures'].max_drawdown_pct * fut_lev > 100:
+            print(f"     🚨 警告：理論最大回撤 > 100%，意味著真實交易會爆倉！")
 
 if __name__ == "__main__":
     main()

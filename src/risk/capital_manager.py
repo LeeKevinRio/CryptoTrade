@@ -1,8 +1,12 @@
 """資金管理 — 倉位大小計算與風控限制"""
 
-from datetime import date
+from datetime import datetime, timezone
 
 from src.utils.logger import setup_logger
+
+
+def _utc_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 logger = setup_logger("capital_manager")
 
@@ -24,16 +28,16 @@ class CapitalManager:
 
         self._daily_pnl: float = 0.0
         self._daily_trades: int = 0
-        self._current_date: str = date.today().isoformat()
+        self._current_date: str = _utc_today()
         self._open_positions: int = 0
 
     def reset_daily(self):
-        today = date.today().isoformat()
+        today = _utc_today()
         if self._current_date != today:
             self._current_date = today
             self._daily_pnl = 0.0
             self._daily_trades = 0
-            logger.info("每日計數器已重置")
+            logger.info("每日計數器已重置 (UTC %s)", today)
 
     def can_trade(self, balance: float) -> tuple[bool, str]:
         """檢查是否可以開新倉"""
@@ -88,6 +92,8 @@ class CapitalManager:
         return orders
 
     def record_trade(self, pnl: float):
+        # 先檢查跨日，確保平倉 PnL 歸屬到正確的日期
+        self.reset_daily()
         self._daily_trades += 1
         self._daily_pnl += pnl
         logger.info(
