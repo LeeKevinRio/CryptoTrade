@@ -148,6 +148,44 @@ class TestCapitalManager(unittest.TestCase):
         self.assertFalse(can)
         self.assertIn("交易次數", reason)
 
+    def test_consecutive_loss_breaker_blocks(self):
+        cfg = {"risk": {**DEFAULT_CONFIG["risk"], "max_consecutive_losses": 3}}
+        cm = CapitalManager(cfg)
+        cm.record_trade(-5.0)
+        cm.record_trade(-5.0)
+        can, _ = cm.can_trade(10000)
+        self.assertTrue(can)  # 連敗 2 < 3，仍可交易
+        cm.record_trade(-5.0)
+        can, reason = cm.can_trade(10000)
+        self.assertFalse(can)  # 連敗 3 → 封鎖
+        self.assertIn("連續虧損", reason)
+
+    def test_consecutive_loss_reset_on_win(self):
+        cfg = {"risk": {**DEFAULT_CONFIG["risk"], "max_consecutive_losses": 3}}
+        cm = CapitalManager(cfg)
+        cm.record_trade(-5.0)
+        cm.record_trade(-5.0)
+        cm.record_trade(8.0)            # 獲利 → 連敗歸零
+        self.assertEqual(cm.consecutive_losses, 0)
+        cm.record_trade(-5.0)
+        cm.record_trade(-5.0)
+        can, _ = cm.can_trade(10000)
+        self.assertTrue(can)            # 重新計數，連敗 2 < 3
+
+    def test_consecutive_loss_breakeven_neutral(self):
+        cfg = {"risk": {**DEFAULT_CONFIG["risk"], "max_consecutive_losses": 3}}
+        cm = CapitalManager(cfg)
+        cm.record_trade(-5.0)
+        cm.record_trade(0.0)            # 平盤 → 不影響連敗串
+        self.assertEqual(cm.consecutive_losses, 1)
+
+    def test_consecutive_loss_disabled_by_default(self):
+        cm = CapitalManager(DEFAULT_CONFIG)  # 未設定 → 0 = 停用
+        for _ in range(10):
+            cm.record_trade(-5.0)
+        can, _ = cm.can_trade(10000)
+        self.assertTrue(can)
+
     def test_position_size(self):
         cm = CapitalManager(DEFAULT_CONFIG)
         qty = cm.calculate_position_size(

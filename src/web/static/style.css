@@ -405,6 +405,29 @@ td {
   grid-column: 1 / 3;
 }
 
+/* ===== 消息面 / 市場情緒 ===== */
+.sentiment-card { grid-column: 1 / 3; }
+.sentiment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.sentiment-item {
+  background: #1a1f29;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.sent-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.sent-sym { font-weight: 700; font-size: 15px; }
+.sent-bias { font-size: 13px; font-weight: 600; }
+.sent-row { display: flex; gap: 14px; font-size: 12px; color: #9ba4b3; margin-bottom: 6px; }
+.sent-news { list-style: none; margin: 0; padding: 0; }
+.sent-news li {
+  font-size: 12px; color: #c3cad6; padding: 2px 0;
+  border-top: 1px solid #232a35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* ===== 績效總表 ===== */
 .perf-card { grid-column: 1 / 3; }
 .perf-period { display: flex; gap: 6px; }

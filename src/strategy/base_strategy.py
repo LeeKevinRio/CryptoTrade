@@ -39,6 +39,7 @@ class BaseStrategy(ABC):
         symbol: str,
         candles: dict[str, pd.DataFrame],
         funding_rate: float = 0.0,
+        sentiment=None,
     ) -> Signal:
         """
         分析市場狀態並產生訊號
@@ -47,6 +48,7 @@ class BaseStrategy(ABC):
             symbol: 交易對
             candles: {interval: DataFrame} 多時間框架 K 線
             funding_rate: 當前資金費率
+            sentiment: SentimentScore | None，消息面/市場情緒（可為 None → 純技術面）
 
         Returns:
             Signal 物件

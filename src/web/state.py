@@ -26,6 +26,7 @@ class GlobalState:
     timeframes: list[str] = field(default_factory=list)
     last_prices: dict[str, float] = field(default_factory=dict)
     last_funding: dict[str, float] = field(default_factory=dict)
+    last_sentiment: dict[str, dict] = field(default_factory=dict)
     candle_manager_ref: Any = None
     ws_feed_ref: Any = None
     bots: dict[str, BotState] = field(default_factory=dict)

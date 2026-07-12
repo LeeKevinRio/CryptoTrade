@@ -20,6 +20,10 @@ class CapitalManager:
         self.max_concurrent = risk_cfg.get("max_concurrent_positions", 3)
         self.max_daily_loss_pct = risk_cfg.get("max_daily_loss_pct", 3.0)
         self.max_daily_trades = risk_cfg.get("max_daily_trades", 20)
+        # 連續虧損熔斷：當日連敗達此筆數即停止開新倉（0 = 停用）。
+        # 針對「連敗級聯」設計：每日虧損%熔斷以餘額為門檻，擋不住一連串各自在門檻內的虧損；
+        # 連敗計數能在資金大幅流失前就先剎車。
+        self.max_consecutive_losses = risk_cfg.get("max_consecutive_losses", 0)
         self.entry_batches = risk_cfg.get("entry_batches", [
             {"pct": 30, "offset": 0.0},
             {"pct": 30, "offset": -1.0},
@@ -28,6 +32,7 @@ class CapitalManager:
 
         self._daily_pnl: float = 0.0
         self._daily_trades: int = 0
+        self._consecutive_losses: int = 0
         self._current_date: str = _utc_today()
         self._open_positions: int = 0
 
@@ -37,6 +42,7 @@ class CapitalManager:
             self._current_date = today
             self._daily_pnl = 0.0
             self._daily_trades = 0
+            self._consecutive_losses = 0
             logger.info("每日計數器已重置 (UTC %s)", today)
 
     def can_trade(self, balance: float) -> tuple[bool, str]:
@@ -52,6 +58,15 @@ class CapitalManager:
         max_loss = balance * (self.max_daily_loss_pct / 100)
         if self._daily_pnl <= -max_loss:
             return False, f"已達每日最大虧損 {self.max_daily_loss_pct}%"
+
+        if (
+            self.max_consecutive_losses > 0
+            and self._consecutive_losses >= self.max_consecutive_losses
+        ):
+            return False, (
+                f"已達連續虧損熔斷 {self._consecutive_losses}/"
+                f"{self.max_consecutive_losses} 筆，今日暫停開倉"
+            )
 
         return True, "OK"
 
@@ -96,9 +111,14 @@ class CapitalManager:
         self.reset_daily()
         self._daily_trades += 1
         self._daily_pnl += pnl
+        # 連敗計數：虧損累加、獲利歸零；平盤（pnl == 0）不影響連敗串
+        if pnl < 0:
+            self._consecutive_losses += 1
+        elif pnl > 0:
+            self._consecutive_losses = 0
         logger.info(
-            "記錄交易: pnl=%.2f | 今日累計: %d 筆, pnl=%.2f",
-            pnl, self._daily_trades, self._daily_pnl,
+            "記錄交易: pnl=%.2f | 今日累計: %d 筆, pnl=%.2f, 連敗 %d",
+            pnl, self._daily_trades, self._daily_pnl, self._consecutive_losses,
         )
 
     def add_position(self):
@@ -118,3 +138,7 @@ class CapitalManager:
     @property
     def daily_trades(self) -> int:
         return self._daily_trades
+
+    @property
+    def consecutive_losses(self) -> int:
+        return self._consecutive_losses

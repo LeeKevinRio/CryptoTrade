@@ -35,6 +35,7 @@ createApp({
       { label: '7天', days: 7 },
     ];
 
+    const sentiment = reactive({ symbols: {}, updated: 0 });
     const positions = ref([]);
     const recentTrades = ref([]);
     const signals = reactive({});
@@ -163,6 +164,25 @@ createApp({
       const r = await fetch('/api/overview');
       const d = await r.json();
       Object.assign(overview, d);
+    };
+
+    const fetchSentiment = async () => {
+      try {
+        const r = await fetch('/api/sentiment');
+        if (!r.ok) return;
+        const d = await r.json();
+        sentiment.symbols = d.symbols || {};
+        sentiment.updated = d.updated || 0;
+      } catch (e) { console.error('fetchSentiment failed', e); }
+    };
+
+    const sentimentList = computed(() => Object.values(sentiment.symbols));
+
+    const biasClass = (bias) => {
+      if (bias == null) return '';
+      if (bias >= 0.2) return 'pnl-up';
+      if (bias <= -0.2) return 'pnl-down';
+      return '';
     };
 
     const fetchPerformance = async () => {
@@ -365,10 +385,12 @@ createApp({
       await fetchStatus();
       await fetchOverview();
       await fetchPerformance();
+      await fetchSentiment();
       connectWs();
       setInterval(fetchStatus, 30000);
       setInterval(fetchOverview, 15000);
       setInterval(fetchPerformance, 30000);
+      setInterval(fetchSentiment, 60000);
       setInterval(() => {
         if (activeTab.value !== 'overview') {
           fetchBotData();
@@ -380,6 +402,7 @@ createApp({
     return {
       activeTab, status, overview, activeBot,
       perf, perfDays, perfPeriods, setPerfDays,
+      sentiment, sentimentList, biasClass, fetchSentiment,
       positions, recentTrades, signalList, todayStats, risk, indicators, events, filteredEvents,
       wsConnected, selectedSymbol, selectedTimeframe, chartContainer,
       showForceModal, forceSymbol, forceSide,

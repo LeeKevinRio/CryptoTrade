@@ -55,6 +55,31 @@
         <div class="ovbot-cta">點擊查看 →</div>
       </section>
 
+      <section class="card sentiment-card" v-if="sentimentList.length">
+        <div class="card-header">
+          <h3>📰 消息面 / 市場情緒</h3>
+        </div>
+        <div class="sentiment-grid">
+          <div v-for="s in sentimentList" :key="s.symbol" class="sentiment-item">
+            <div class="sent-head">
+              <span class="sent-sym">{{ s.symbol }}</span>
+              <span class="sent-bias" :class="biasClass(s.bias)">
+                bias {{ s.bias >= 0 ? '+' : '' }}{{ s.bias }} · {{ s.label }}
+              </span>
+            </div>
+            <div class="sent-row">
+              <span v-if="s.fear_greed != null">😨 F&amp;G {{ s.fear_greed }} ({{ s.fear_greed_label }})</span>
+              <span v-if="s.news_score != null" :class="biasClass(s.news_score)">
+                📈 新聞 {{ s.news_score >= 0 ? '+' : '' }}{{ s.news_score }}
+              </span>
+            </div>
+            <ul v-if="s.news_headlines?.length" class="sent-news">
+              <li v-for="(h, i) in s.news_headlines.slice(0,3)" :key="i">{{ h }}</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
       <section class="card perf-card">
         <div class="card-header">
           <h3>📊 績效總表</h3>
@@ -205,6 +230,10 @@
         <div class="risk-row">
           <span class="risk-label">每日交易次數</span>
           <span class="risk-val">{{ risk.daily_trades ?? 0 }} / {{ risk.max_daily_trades ?? 0 }}</span>
+        </div>
+        <div class="risk-row" v-if="risk.max_consecutive_losses">
+          <span class="risk-label">連續虧損</span>
+          <span class="risk-val" :class="{'risk-warn': risk.consecutive_losses >= risk.max_consecutive_losses}">{{ risk.consecutive_losses ?? 0 }} / {{ risk.max_consecutive_losses }}</span>
         </div>
         <div class="bar-wrap">
           <div class="bar-fill bar-trades" :style="{width: tradePctUsed + '%'}"></div>

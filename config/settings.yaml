@@ -23,13 +23,15 @@ bots:
       min_signals: 3
       strong_signal_threshold: 70
       medium_signal_threshold: 60
-      weights:
-        rsi: 0.20
-        bollinger: 0.15
-        macd: 0.20
-        volume: 0.15
+      weights:                        # 總和=1.0；消息面權重最大（技術+消息面為主）
+        rsi: 0.18
+        bollinger: 0.12
+        macd: 0.15
+        volume: 0.10
         multi_timeframe: 0.15
-        funding_rate: 0.15
+        funding_rate: 0.10
+        sentiment: 0.20
+      sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
       dip_buyer:
         rsi_oversold: 30
         rsi_15m_threshold: 35
@@ -57,6 +59,7 @@ bots:
       max_concurrent_positions: 2
       max_daily_loss_pct: 3.0
       max_daily_trades: 15
+      max_consecutive_losses: 4         # 連敗 4 筆即停止當日開倉（0 = 停用）
       entry_batches:
         - pct: 50
           offset: 0.0
@@ -72,13 +75,15 @@ bots:
       min_signals: 4                # 收緊：3 → 4，過濾低品質訊號（避免進場 15 秒被滑點吃光）
       strong_signal_threshold: 70   # 收緊：65 → 70
       medium_signal_threshold: 62   # 收緊：58 → 62
-      weights:
-        rsi: 0.20
-        bollinger: 0.15
-        macd: 0.20
-        volume: 0.15
+      weights:                        # 總和=1.0；消息面權重最大（技術+消息面為主）
+        rsi: 0.18
+        bollinger: 0.12
+        macd: 0.15
+        volume: 0.10
         multi_timeframe: 0.15
-        funding_rate: 0.15
+        funding_rate: 0.10
+        sentiment: 0.20
+      sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
       dip_buyer:
         rsi_oversold: 32            # 略放寬
         rsi_15m_threshold: 38
@@ -107,6 +112,7 @@ bots:
       max_concurrent_positions: 3
       max_daily_loss_pct: 3.0       # ⚠️ 硬牆，不放寬
       max_daily_trades: 50
+      max_consecutive_losses: 3     # 連敗 3 筆即停止當日開倉，防止 05-23 那種 5 連敗級聯（0 = 停用）
       entry_batches:
         - pct: 50
           offset: 0.0
@@ -118,6 +124,18 @@ bots:
 notification:
   enabled: true
   telegram: true
+
+# 消息面/市場情緒（技術分析之外的第 7 個加權訊號）
+sentiment:
+  enabled: true
+  refresh_seconds: 900            # 15 分鐘更新一次（F&G 每日更新、新聞數分鐘）
+  http_timeout: 6.0               # 單一來源逾時秒數；逾時不阻斷交易、退回中性
+  fear_greed_weight: 0.6          # 市場情緒（反向：恐慌挺多、貪婪挺空）
+  news_weight: 0.4                # 新聞情緒（順勢：利多挺多、利空挺空）
+  news_feeds:                     # 免費 RSS，無需金鑰
+    - https://www.coindesk.com/arc/outboundfeeds/rss/
+    - https://cointelegraph.com/rss
+    - https://cryptopotato.com/feed/
 
 database:
   url: "sqlite+aiosqlite:///cryptotrade.db"

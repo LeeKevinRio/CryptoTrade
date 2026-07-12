@@ -129,6 +129,17 @@ def create_app(tracker=None) -> FastAPI:
             ],
         }
 
+    @app.get("/api/sentiment")
+    async def get_sentiment():
+        """消息面/市場情緒 — 各交易對的 F&G + 新聞 + 合成 bias"""
+        return {
+            "symbols": state.last_sentiment,
+            "updated": max(
+                (s.get("updated_at", 0) for s in state.last_sentiment.values()),
+                default=0,
+            ),
+        }
+
     # ── K 線（共用） ────────────────────────────
 
     @app.get("/api/candles/{symbol}/{interval}")
@@ -274,6 +285,8 @@ def create_app(tracker=None) -> FastAPI:
             "max_daily_loss_pct": cm.max_daily_loss_pct,
             "max_daily_loss_usd": round(max_loss_usd, 2),
             "loss_budget_used_pct": round(loss_used_pct, 1),
+            "consecutive_losses": cm.consecutive_losses,
+            "max_consecutive_losses": cm.max_consecutive_losses,
             "can_trade": can_trade,
             "reason": reason,
         }

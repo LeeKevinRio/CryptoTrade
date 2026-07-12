@@ -32,12 +32,14 @@ class DipBuyer(BaseStrategy):
         symbol: str,
         candles: dict[str, pd.DataFrame],
         funding_rate: float = 0.0,
+        sentiment=None,
     ) -> Signal:
         cfg = self.config.get("strategy", {}).get("dip_buyer", {})
         rsi_threshold = cfg.get("rsi_oversold", 30)
         rsi_15m_threshold = cfg.get("rsi_15m_threshold", 35)
         vol_multiplier = cfg.get("volume_multiplier", 1.5)
         min_signals = self.config.get("strategy", {}).get("min_signals", 3)
+        sentiment_threshold = self.config.get("strategy", {}).get("sentiment_threshold", 0.2)
 
         reasons = []
         score = 0
@@ -101,6 +103,12 @@ class DipBuyer(BaseStrategy):
             w = weights.get("funding_rate", 0.15)
             score += w * 100
             reasons.append(f"資金費率為負 ({funding_rate * 100:.4f}%)")
+
+        # ── 條件 8: 消息面/市場情緒（極度恐慌 + 利多新聞 → 挺多）──
+        if sentiment is not None and sentiment.long_support(sentiment_threshold):
+            w = weights.get("sentiment", 0.20)
+            score += w * 100 * min(1.0, sentiment.bias)   # 依 bias 強度加權
+            reasons.append(f"消息面挺多 ({sentiment.summary()})")
 
         # ── 產生訊號 ──
         signal_type = SignalType.NEUTRAL

@@ -12,6 +12,7 @@ from src.risk.position_manager import PositionManager
 from src.execution.order_executor import OrderExecutor
 from src.execution.order_tracker import OrderTracker
 from src.notification.notifier import TelegramNotifier
+from src.sentiment import MarketSentimentProvider
 from src.utils.config import load_config
 from src.utils.models import init_db
 from src.utils.logger import setup_logger
@@ -175,10 +176,11 @@ class TradeBot:
             self.logger.warning("[%s] 取餘額失敗: %s", self.bot_id, e)
             return 0.0
 
-    async def on_kline_close(self, symbol: str, candles: dict, funding_rate: float):
+    async def on_kline_close(self, symbol: str, candles: dict, funding_rate: float,
+                             sentiment=None):
         """K 線收盤時的策略評估"""
         bot_state = state.bots[self.bot_id]
-        signal = self.aggregator.evaluate(symbol, candles, funding_rate)
+        signal = self.aggregator.evaluate(symbol, candles, funding_rate, sentiment)
 
         # 現貨過濾 SHORT
         if self.config.get("only_long") and signal.type == SignalType.SHORT:
@@ -374,6 +376,9 @@ class TradeOrchestrator:
         self.symbols = config.get("trading", {}).get("symbols", ["BTCUSDT"])
         self.timeframes = config.get("trading", {}).get("timeframes", ["5m", "15m", "1h"])
 
+        # 共用市場情緒提供者（F&G + 新聞），所有 bot 共用同一份快取
+        self.sentiment_provider = MarketSentimentProvider(config)
+
         # 共用通知 / DB tracker
         tg = config.get("telegram", {})
         self.notifier = TelegramNotifier(
@@ -507,9 +512,18 @@ class TradeOrchestrator:
             funding_rate = 0.0
         state.last_funding[symbol] = funding_rate
 
+        # 消息面/市場情緒（TTL 快取，抓取失敗自動退回中性）
+        try:
+            sentiment = await self.sentiment_provider.get(symbol)
+        except Exception as e:  # noqa: BLE001 — 情緒層絕不阻斷交易
+            logger.warning("情緒取得失敗，退回中性: %s", e)
+            sentiment = None
+        if sentiment is not None:
+            state.last_sentiment[symbol] = sentiment.to_dict()
+
         # 廣播給所有 bot
         for bot in self.bots.values():
-            await bot.on_kline_close(symbol, candles, funding_rate)
+            await bot.on_kline_close(symbol, candles, funding_rate, sentiment)
 
 
 async def main():

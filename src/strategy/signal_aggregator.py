@@ -31,9 +31,10 @@ class SignalAggregator:
         symbol: str,
         candles: dict[str, pd.DataFrame],
         funding_rate: float = 0.0,
+        sentiment=None,
     ) -> Signal:
-        long_signal = self.dip_buyer.analyze(symbol, candles, funding_rate)
-        short_signal = self.short_seller.analyze(symbol, candles, funding_rate)
+        long_signal = self.dip_buyer.analyze(symbol, candles, funding_rate, sentiment)
+        short_signal = self.short_seller.analyze(symbol, candles, funding_rate, sentiment)
 
         # 衝突檢查：同時出現多空訊號 → 不動作
         if long_signal.is_actionable and short_signal.is_actionable:

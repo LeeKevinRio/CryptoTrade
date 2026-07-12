@@ -32,12 +32,14 @@ class ShortSeller(BaseStrategy):
         symbol: str,
         candles: dict[str, pd.DataFrame],
         funding_rate: float = 0.0,
+        sentiment=None,
     ) -> Signal:
         cfg = self.config.get("strategy", {}).get("short_seller", {})
         rsi_threshold = cfg.get("rsi_overbought", 70)
         rsi_15m_threshold = cfg.get("rsi_15m_threshold", 65)
         fr_threshold = cfg.get("funding_rate_high", 0.05)
         min_signals = self.config.get("strategy", {}).get("min_signals", 3)
+        sentiment_threshold = self.config.get("strategy", {}).get("sentiment_threshold", 0.2)
 
         reasons = []
         score = 0
@@ -100,6 +102,12 @@ class ShortSeller(BaseStrategy):
             w = weights.get("funding_rate", 0.15)
             score += w * 100
             reasons.append(f"資金費率過高 ({funding_rate * 100:.4f}%)")
+
+        # ── 條件 8: 消息面/市場情緒（極度貪婪 + 利空新聞 → 挺空）──
+        if sentiment is not None and sentiment.short_support(sentiment_threshold):
+            w = weights.get("sentiment", 0.20)
+            score += w * 100 * min(1.0, abs(sentiment.bias))   # 依 bias 強度加權
+            reasons.append(f"消息面挺空 ({sentiment.summary()})")
 
         # ── 產生訊號 ──
         signal_type = SignalType.NEUTRAL
