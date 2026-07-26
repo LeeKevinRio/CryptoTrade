@@ -69,12 +69,13 @@ bots:
   futures:
     enabled: true
     mode: futures
-    leverage: 10                    # 高風險：10x
+    leverage: 15                    # 激進模式：10 → 15x
     only_long: false
     strategy:
-      min_signals: 4                # 收緊：3 → 4，過濾低品質訊號（避免進場 15 秒被滑點吃光）
-      strong_signal_threshold: 70   # 收緊：65 → 70
-      medium_signal_threshold: 62   # 收緊：58 → 62
+      # ── 激進模式：放寬進場條件以提高交易頻率（使用者明確接受大震盪）──
+      min_signals: 3                # 4 → 3，較少共振條件即可進場
+      strong_signal_threshold: 62   # 70 → 62，較容易觸發全額建倉
+      medium_signal_threshold: 50   # 62 → 50，同時是 is_actionable 門檻（原寫死 60，現已可設定）
       weights:                        # 總和=1.0；消息面權重最大（技術+消息面為主）
         rsi: 0.18
         bollinger: 0.12
@@ -85,34 +86,38 @@ bots:
         sentiment: 0.20
       sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
       dip_buyer:
-        rsi_oversold: 32            # 略放寬
-        rsi_15m_threshold: 38
-        volume_multiplier: 1.3
-        support_tolerance_pct: 0.5
+        rsi_oversold: 38            # 32 → 38，超賣判定放寬，訊號變多
+        rsi_15m_threshold: 45
+        volume_multiplier: 1.1      # 1.3 → 1.1，量能門檻放寬
+        support_tolerance_pct: 0.8
       short_seller:
-        rsi_overbought: 68
-        rsi_15m_threshold: 62
-        funding_rate_high: 0.03
-        resistance_tolerance_pct: 0.5
+        rsi_overbought: 62          # 68 → 62，超買判定放寬
+        rsi_15m_threshold: 56
+        funding_rate_high: 0.02     # 0.03 → 0.02
+        resistance_tolerance_pct: 0.8
     risk:
+      # ── 出場參數來自 param_sweep 掃描結果（156 組中最佳）──
+      # 基準 SL2.0/TP0.7-1.5-3.0/trail0.5 → payoff 0.35、總盈虧 -5.8%
+      # 本組 SL1.5/TP1.5-2.5-4.5/trail0.4 → payoff 0.71、總盈虧 -1.9%
       take_profit:
-        level_1_pct: 0.7            # 收緊：0.3 → 0.7，讓贏的單跑久一點
-        level_1_close_pct: 40       # L1 平倉比例下修，留更多倉位給 L2/L3 與 trailing
-        level_2_pct: 1.5            # 0.8 → 1.5
+        level_1_pct: 1.5            # 0.7 → 1.5，第一階拉遠，避免贏太小
+        level_1_close_pct: 40
+        level_2_pct: 2.5            # 1.5 → 2.5
         level_2_close_pct: 35
-        level_3_pct: 3.0            # 1.8 → 3.0
+        level_3_pct: 4.5            # 3.0 → 4.5，讓大單跑滿
         level_3_close_pct: 25
       trailing_stop:
-        activation_pct: 1.0         # 0.5 → 1.0，到 +1% 才啟動追蹤
-        callback_pct: 0.5           # 回撤 0.5% 平倉
+        activation_pct: 1.0
+        callback_pct: 0.4           # 0.5 → 0.4，回撤更早鎖利
       time_stop_seconds: 2400
       time_stop_no_movement_pct: 0.4  # 倉位生命週期 max excursion 兩側都 < 0.4% 才視為「無波動」可平
-      stop_loss_pct: 2.0            # 2.0% — 留足噪音空間（10x → 帳戶 -20%）
-      max_position_pct: 20          # 高風險：單筆 20%
-      max_concurrent_positions: 3
-      max_daily_loss_pct: 3.0       # ⚠️ 硬牆，不放寬
-      max_daily_trades: 50
-      max_consecutive_losses: 3     # 連敗 3 筆即停止當日開倉，防止 05-23 那種 5 連敗級聯（0 = 停用）
+      stop_loss_pct: 1.5            # 2.0 → 1.5，配合 15x 控制單筆風險
+      # ── 部位放大：單筆 25% × 15x = 3.75x 帳戶名目；3 筆並行 → 佔用 75% 保證金（留 25% 緩衝）──
+      max_position_pct: 25          # 20 → 25
+      max_concurrent_positions: 3   # 維持 3：25% × 3 = 75% 保證金，再高會保證金不足下不了單
+      max_daily_loss_pct: 25.0      # 3 → 25：單筆最大虧損約帳戶 5.6%，需容納數筆才不會一虧就停
+      max_daily_trades: 150         # 50 → 150，配合高頻
+      max_consecutive_losses: 5     # 3 → 5，放寬熔斷讓策略有機會跑（仍保留級聯保護）
       entry_batches:
         - pct: 50
           offset: 0.0

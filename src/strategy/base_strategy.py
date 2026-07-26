@@ -21,10 +21,13 @@ class Signal:
     reasons: list[str] = field(default_factory=list)
     price: float = 0.0
     timestamp: str = ""
+    # 可動作門檻：由策略依 config 的 medium_signal_threshold 帶入。
+    # 預設 60 維持既有行為；調低可提高交易頻率（訊號較不嚴格）。
+    min_strength: float = 60.0
 
     @property
     def is_actionable(self) -> bool:
-        return self.type != SignalType.NEUTRAL and self.strength >= 60
+        return self.type != SignalType.NEUTRAL and self.strength >= self.min_strength
 
 
 class BaseStrategy(ABC):

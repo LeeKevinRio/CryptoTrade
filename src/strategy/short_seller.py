@@ -40,6 +40,7 @@ class ShortSeller(BaseStrategy):
         fr_threshold = cfg.get("funding_rate_high", 0.05)
         min_signals = self.config.get("strategy", {}).get("min_signals", 3)
         sentiment_threshold = self.config.get("strategy", {}).get("sentiment_threshold", 0.2)
+        min_strength = self.config.get("strategy", {}).get("medium_signal_threshold", 60)
 
         reasons = []
         score = 0
@@ -120,6 +121,7 @@ class ShortSeller(BaseStrategy):
             strength=round(score, 1),
             reasons=reasons,
             price=current_price,
+            min_strength=min_strength,
         )
 
         if signal.is_actionable:
