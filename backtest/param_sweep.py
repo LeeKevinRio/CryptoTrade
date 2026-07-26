@@ -33,7 +33,8 @@ from backtest.run_offline_backtest import generate_realistic_data
 # 掃描維度：name -> (config 路徑, 候選值)
 # 路徑相對於扁平 config {"strategy": ..., "risk": ...}
 SWEEP_GRID = {
-    "stop_loss_pct":  (("risk", "stop_loss_pct"),                  [1.5, 2.0, 2.5, 3.0]),
+    # 真實資料掃描顯示停損是主導變數，且最佳值落在舊網格上限，故延伸到 5.0
+    "stop_loss_pct":  (("risk", "stop_loss_pct"),                  [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]),
     "level_1_pct":    (("risk", "take_profit", "level_1_pct"),     [0.7, 1.0, 1.5]),
     "level_2_pct":    (("risk", "take_profit", "level_2_pct"),     [1.5, 2.5, 3.5]),
     "level_3_pct":    (("risk", "take_profit", "level_3_pct"),     [3.0, 4.5]),
@@ -200,14 +201,21 @@ RANK_KEYS = {
 }
 
 
-def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pnl"):
+def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pnl",
+              real: bool = False, symbol: str = "BTCUSDT"):
     config = load_config()
     bot_cfg = config.get("bots", {}).get(bot_id)
     if not bot_cfg:
         raise SystemExit(f"config 找不到 bot: {bot_id}")
 
-    df = generate_realistic_data(days=days, interval_minutes=5)
-    symbol = "BTCUSDT"
+    if real:
+        import asyncio
+        from backtest.fetch_klines import get_klines_df
+        df = asyncio.run(get_klines_df(symbol, "5m", days))
+        print(f"  真實資料 {symbol}：{len(df)} 根 | "
+              f"{df.index[0]:%Y-%m-%d} ~ {df.index[-1]:%Y-%m-%d}", flush=True)
+    else:
+        df = generate_realistic_data(days=days, interval_minutes=5)
     base_flat = _flat_cfg(bot_cfg)
 
     closes = df["close"].to_numpy(dtype=float)
@@ -258,9 +266,11 @@ def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pn
     eligible = [r for r in rows if r.trades >= min_trades]
     key = RANK_KEYS.get(rank, RANK_KEYS["pnl"])
     eligible.sort(key=key, reverse=True)
-    n_payoff_ok = sum(1 for r in eligible if r.payoff >= 1.0)
+    # 獲利判準是 PF>1（等價於期望值>0），不是 payoff>=1：
+    # payoff<1 只要勝率夠高仍可獲利（例：勝率 77% + payoff 0.36 → PF 1.17）
+    n_profitable = sum(1 for r in eligible if r.profit_factor > 1.0)
 
-    return bot_id, days, tested, min_trades, rank, n_payoff_ok, baseline, eligible[:top]
+    return bot_id, days, tested, min_trades, rank, n_profitable, baseline, eligible[:top]
 
 
 def _read_path(cfg: dict, path: tuple):
@@ -277,8 +287,8 @@ def _fmt_params(p: dict) -> str:
     )
 
 
-def _print_report(bot_id, days, tested, min_trades, rank, n_payoff_ok,
-                  baseline: SweepRow, top: list[SweepRow]):
+def _print_report(bot_id, days, tested, min_trades, rank, n_profitable,
+                  baseline: SweepRow, top: list[SweepRow], source: str = "模擬資料(seed=42)"):
     lines = []
     def out(s=""):
         print(s)
@@ -287,7 +297,8 @@ def _print_report(bot_id, days, tested, min_trades, rank, n_payoff_ok,
     out("=" * 78)
     out(f"  參數掃描結果 — bot={bot_id}  資料={days}天  測試組合={tested}  "
         f"排序={rank}  (min_trades={min_trades})")
-    out(f"  達 payoff>=1 的組合：{n_payoff_ok}/{tested}")
+    out(f"  資料來源：{source}")
+    out(f"  獲利組合（PF>1）：{n_profitable}/{tested}")
     out("=" * 78)
     header = f"  {'參數組合':<46}{'筆':>4}{'勝率':>6}{'總盈虧':>9}{'payoff':>8}{'PF':>6}{'期望':>8}{'回撤':>8}"
     out(header)
@@ -312,14 +323,16 @@ def _print_report(bot_id, days, tested, min_trades, rank, n_payoff_ok,
         out(f"     {_fmt_params(best.params)}")
         out(f"     總盈虧 {baseline.total_pnl_pct:+.1f}% → {best.total_pnl_pct:+.1f}%   "
             f"勝率 {baseline.win_rate:.0f}% → {best.win_rate:.0f}%   "
-            f"payoff {baseline.payoff:.2f} → {best.payoff:.2f}")
-        if n_payoff_ok == 0:
-            out("\n  ⚠️  沒有任何出場參數組合能讓 payoff>=1 —— 代表瓶頸在【進場訊號品質】，"
-                "\n     光調停損/停利救不了盈虧比。下一步應調進場條件（min_signals / 訊號門檻）"
-                "\n     或改用真實歷史K線重驗。")
+            f"PF {baseline.profit_factor:.2f} → {best.profit_factor:.2f}   "
+            f"期望 {baseline.expectancy_pct:+.3f}% → {best.expectancy_pct:+.3f}%")
+        if n_profitable == 0:
+            out("\n  ⚠️  沒有任何出場參數組合能讓 PF>1 —— 瓶頸在【進場訊號品質】，"
+                "\n     光調停損/停利救不了。下一步應調進場條件（min_signals / 訊號門檻）。")
         else:
-            out("\n  套用方式：把排序第一的 SL / TP 三階 / trail回撤 填回 config/settings.yaml，再實單觀察。")
-    out("\n  ⚠️  此為模擬資料(seed=42)結果，僅供相對比較；上線前請用真實歷史K線複驗。")
+            out(f"\n  套用方式：把排序第一的 SL / TP 三階 / trail回撤 填回 config/settings.yaml。")
+            out("  ⚠️  套用前務必用另一個交易對／另一段期間做樣本外驗證，避免過擬合。")
+    out("\n  ⚠️  回測未計手續費與資金費率。高槓桿下每筆來回約吃掉帳戶 "
+        "(2 × 0.04% × 槓桿 × 單筆%)，交易越頻繁侵蝕越大。")
     return "\n".join(lines)
 
 
@@ -340,15 +353,22 @@ def main():
     ap.add_argument("--rank", default="pnl", choices=list(RANK_KEYS.keys()),
                     help="排序指標：pnl / winrate / payoff / expectancy（預設 pnl）")
     ap.add_argument("--no-report", action="store_true", help="不寫入 reports/ 檔案")
+    ap.add_argument("--real", action="store_true",
+                    help="使用真實歷史 K 線（Binance 公開端點 + 本地快取）而非模擬資料")
+    ap.add_argument("--symbol", default="BTCUSDT", help="--real 時的交易對")
     args = ap.parse_args()
 
-    bot_id, days, tested, min_trades, rank, n_payoff_ok, baseline, top = run_sweep(
+    bot_id, days, tested, min_trades, rank, n_profitable, baseline, top = run_sweep(
         args.bot, args.days, args.min_trades, args.top, args.rank,
+        real=args.real, symbol=args.symbol,
     )
-    report = _print_report(bot_id, days, tested, min_trades, rank, n_payoff_ok, baseline, top)
+    source = f"真實歷史K線 {args.symbol}" if args.real else "模擬資料(seed=42)"
+    report = _print_report(bot_id, days, tested, min_trades, rank, n_profitable,
+                           baseline, top, source)
     if not args.no_report:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = f"reports/sweep-{bot_id}-{ts}.md"
+        src = f"real-{args.symbol}" if args.real else "sim"
+        path = f"reports/sweep-{bot_id}-{src}-{ts}.md"
         with open(path, "w", encoding="utf-8") as f:
             f.write("# 參數掃描報表\n\n```\n")
             f.write(report)
