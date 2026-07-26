@@ -18,6 +18,7 @@ venv/
 
 # Data
 backtest/data/*.csv
+data/klines/           # 真實歷史 K 線快取（由 backtest/fetch_klines.py 產生）
 *.db
 
 # Logs
