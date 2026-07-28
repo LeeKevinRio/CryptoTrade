@@ -1,9 +1,15 @@
 # === CryptoTrade 全域設定 ===
 
 trading:
+  # 交易對經真實 K 線驗證（45天，含手續費）才納入；期望值為負者不加入
+  #   BTCUSDT +0.074%/筆  ETHUSDT +0.232%  SOLUSDT +0.304%  BNBUSDT +0.457%
+  #   排除：XRPUSDT -0.046%、DOGEUSDT -0.016%
+  # 增加標的是在不降低訊號品質的前提下提高頻率（1.58 → 3.05 筆/天）
   symbols:
     - BTCUSDT
     - ETHUSDT
+    - SOLUSDT
+    - BNBUSDT
   timeframes:
     - 1m
     - 5m
@@ -116,10 +122,12 @@ bots:
       time_stop_no_movement_pct: 0.4  # 倉位生命週期 max excursion 兩側都 < 0.4% 才視為「無波動」可平
       stop_loss_pct: 4.0            # 1.5 → 4.0：真實資料驗證的核心改動
       max_stop_pct: 6.0             # 上限提高，否則 ATR 動態停損會被預設 4.0 卡死無法放寬
-      # ── 部位放大：單筆 25% × 10x = 2.5x 帳戶名目；3 筆並行 → 佔用 75% 保證金（留 25% 緩衝）──
-      max_position_pct: 25          # 20 → 25
-      max_concurrent_positions: 3   # 維持 3：25% × 3 = 75% 保證金，再高會保證金不足下不了單
-      max_daily_loss_pct: 25.0      # 單筆停損虧帳戶 10%（4.0% × 2.5x），容納約 2.5 筆
+      # ── 4 個標的 → 提高並行數以實際用到 breadth，並下調單筆以維持總曝險不變 ──
+      # 18% × 4 = 72% 保證金（留 28% 緩衝）；總名目 4 × 1.8x = 7.2x（原 3 × 2.5x = 7.5x）
+      # 同樣曝險分散到 4 個標的，單筆風險反而下降
+      max_position_pct: 18          # 25 → 18
+      max_concurrent_positions: 4   # 3 → 4，讓 4 個標的可同時持有
+      max_daily_loss_pct: 25.0      # 單筆停損虧帳戶 7.2%（4.0% × 1.8x），容納約 3.5 筆
       max_daily_trades: 150         # 50 → 150，配合高頻
       max_consecutive_losses: 5     # 3 → 5，放寬熔斷讓策略有機會跑（仍保留級聯保護）
       entry_batches:
@@ -156,4 +164,4 @@ logging:
 web:
   enabled: true
   host: 127.0.0.1               # 預設僅本機可連，要對外請改 0.0.0.0 並設定 WEB_AUTH_TOKEN
-  port: 8788
+  port: 8899                    # 變更時記得同步 run_bot.bat 的重複啟動守門 port
