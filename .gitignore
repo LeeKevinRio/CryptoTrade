@@ -28,3 +28,4 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+data/sides/            # 訊號預算快取（可重建）

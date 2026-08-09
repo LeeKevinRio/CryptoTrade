@@ -15,10 +15,13 @@ Walk-forward 的紀律：
 
 import argparse
 import asyncio
+import hashlib
 import itertools
+import json
 import logging
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -30,6 +33,21 @@ from backtest.param_sweep import (
 from src.utils.config import load_config
 
 FEE = 0.08          # % 名目，來回
+
+# Walk-forward 專用粗網格。
+# 每折候選數少不是妥協：候選越多，訓練期「最佳」越可能是雜訊，
+# 反而讓每一折都在過擬合。完整 1920 組留給單期掃描做探索用。
+WF_GRID = {
+    "stop_loss_pct":  [2.0, 3.0, 4.0],
+    "level_1_pct":    [1.0, 1.5],
+    "level_2_pct":    [2.5],
+    "level_3_pct":    [3.0],
+    "trail_callback": [0.4, 0.8],
+    "time_stop_seconds": [1200, 2400, 7200, None],
+    "time_stop_no_movement_pct": [0.2, 0.4],
+}
+
+SIDES_CACHE = Path("data/sides")
 
 
 @dataclass
@@ -43,11 +61,46 @@ class Fold:
     test_pnls: list
 
 
-def _combos() -> list[dict]:
-    names = list(SWEEP_GRID)
-    vals = [SWEEP_GRID[n][1] for n in names]
+def _combos(grid: dict | None = None) -> list[dict]:
+    if grid is None:
+        grid = WF_GRID
+    names = list(grid)
+    vals = [grid[n] for n in names]
     return [c for c in (dict(zip(names, v)) for v in itertools.product(*vals))
             if _valid_tp_order(c)]
+
+
+def _cached_sides(sym: str, df, strategy: dict, replay) -> np.ndarray:
+    """訊號預算結果快取到磁碟。
+
+    precompute 是全流程最貴的一步（~250 根/秒，2 年資料約 14 分鐘/標的），
+    且只要策略參數不變就完全可重用。快取讓中斷後能續跑、重跑近乎免費。
+    key 納入策略參數與資料範圍，任何一項改變都會重算。
+    """
+    fingerprint = json.dumps({
+        "strategy": strategy,
+        "n": len(df),
+        "start": str(df.index[0]),
+        "end": str(df.index[-1]),
+        "replay": bool(replay),
+    }, sort_keys=True, default=str)
+    key = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+    path = SIDES_CACHE / f"{sym}_{key}.npy"
+
+    if path.exists():
+        try:
+            sides = np.load(path)
+            if len(sides) == len(df):
+                print(f"    （使用快取 {path.name}）", flush=True)
+                return sides
+        except Exception:  # noqa: BLE001 — 快取毀損就重算
+            pass
+
+    sides = precompute_sides(df, {"strategy": strategy, "risk": {}}, sym,
+                             faithful=True, sentiment_replay=replay)
+    SIDES_CACHE.mkdir(parents=True, exist_ok=True)
+    np.save(path, sides)
+    return sides
 
 
 def _expectancy(pnls) -> float:
@@ -170,8 +223,7 @@ def main():
     for sym in syms:
         df = asyncio.run(get_klines_df(sym, "5m", args.days))
         print(f"  {sym}: {len(df):,} 根，計算訊號中...", flush=True)
-        sides = precompute_sides(df, {"strategy": strategy, "risk": {}}, sym,
-                                 faithful=True, sentiment_replay=replay)
+        sides = _cached_sides(sym, df, strategy, replay)
         f = run_symbol(sym, df, sides, train_bars, test_bars, combos, args.min_trades)
         folds += f
         print(f"    → {len(f)} folds，樣本外 {sum(len(x.test_pnls) for x in f)} 筆",
