@@ -37,7 +37,11 @@ bots:
         multi_timeframe: 0.15
         funding_rate: 0.10
         sentiment: 0.20
+        external: 0.0                 # TradingView webhook 訊號權重
+                                      # 預設 0 = 收訊號但不影響評分（先觀察再調高，例如 0.25）
+                                      # 調高時請同步下修其他權重，維持總和 1.0
       sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
+      external_threshold: 0.2         # |bias| >= 此值才把外部訊號計入評分
       dip_buyer:
         rsi_oversold: 30
         rsi_15m_threshold: 35
@@ -92,7 +96,11 @@ bots:
         multi_timeframe: 0.15
         funding_rate: 0.10
         sentiment: 0.20
+        external: 0.0                 # TradingView webhook 訊號權重
+                                      # 預設 0 = 收訊號但不影響評分（先觀察再調高，例如 0.25）
+                                      # 調高時請同步下修其他權重，維持總和 1.0
       sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
+      external_threshold: 0.2         # |bias| >= 此值才把外部訊號計入評分
       dip_buyer:
         rsi_oversold: 38            # 32 → 38，超賣判定放寬，訊號變多
         rsi_15m_threshold: 45
@@ -104,25 +112,28 @@ bots:
         funding_rate_high: 0.02     # 0.03 → 0.02
         resistance_tolerance_pct: 0.8
     risk:
-      # ── 出場參數：真實歷史 K 線驗證（BTC+ETH 各 90 天 25920 根，已扣手續費）──
-      # 停損是主導變數：太緊會被雜訊掃出場，勝率與期望值雙輸
-      #   SL1.5（前一版）→ BTC 淨 -20.1% / ETH +3.6% → 帳戶 -61.8%
-      #   SL4.0（本組）  → BTC 淨  +4.2% / ETH +19.7% → 帳戶 +89.7%（當時 15x 試算）
-      # 本組在 BTC 與 ETH 兩個獨立交易對的掃描中都排名第一，非單一標的過擬合
+      # ── 出場參數：保真回測 + 4 標的樣本外驗證（90天真實K線，已扣手續費）──
+      # 修好回測保真度（真時框重取樣＋情緒回放＋時間停損模擬）後重新驗證，
+      # 先前基於不忠實回測的參數全部失效。跨標的合計淨報酬：
+      #   前一版 SL4.0/tr0.4/時停40分  → BTC -12.8 ETH -1.6 SOL -12.6 BNB -4.9 = -32.0（0/4 正）
+      #   BTC 掃描第1名 SL3.0/tr0.8/時停240分 → 僅 BTC 正，其餘全負 = -34.5（1/4）純過擬合
+      #   本組   SL3.0/tr0.4/時停20分   → BTC +1.7 ETH +1.6 SOL -10.1 BNB +6.6 = -0.2（3/4 正）
+      # 本組是唯一 3/4 標的為正、期望值約零的組合；其餘皆顯著為負。
+      # ⚠️ 期望值僅「約等於零」，非已證實的 edge。用 scripts/check_edge.py 持續追蹤。
       take_profit:
         level_1_pct: 1.5
         level_1_close_pct: 40
         level_2_pct: 2.5
         level_2_close_pct: 35
-        level_3_pct: 3.0            # 4.5 → 3.0（驗證最佳）
+        level_3_pct: 3.0
         level_3_close_pct: 25
       trailing_stop:
         activation_pct: 1.0
-        callback_pct: 0.4           # tr0.4：兩幣都正報酬，較 tr0.8 穩健（後者 BTC 僅 +0.5%）
-      time_stop_seconds: 2400
-      time_stop_no_movement_pct: 0.4  # 倉位生命週期 max excursion 兩側都 < 0.4% 才視為「無波動」可平
-      stop_loss_pct: 4.0            # 1.5 → 4.0：真實資料驗證的核心改動
-      max_stop_pct: 6.0             # 上限提高，否則 ATR 動態停損會被預設 4.0 卡死無法放寬
+        callback_pct: 0.4
+      time_stop_seconds: 1200         # 2400 → 1200（20分）：跨標的驗證最穩健
+      time_stop_no_movement_pct: 0.2  # 0.4 → 0.2，無波動判定收緊
+      stop_loss_pct: 3.0              # 4.0 → 3.0
+      max_stop_pct: 6.0               # 上限保留，讓 ATR 動態停損仍可放寬
       # ── 部位公式：notional = 餘額 × max_position_pct × leverage ──
       # 槓桿與單筆% 是可互換的乘數；全倉下決定生死的是「總名目/淨值」而非槓桿數字
       #   25x × 12% = 單筆名目 3.0x 帳戶；4 筆並行 → 總名目 12x

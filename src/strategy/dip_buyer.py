@@ -33,6 +33,7 @@ class DipBuyer(BaseStrategy):
         candles: dict[str, pd.DataFrame],
         funding_rate: float = 0.0,
         sentiment=None,
+        external=None,
     ) -> Signal:
         cfg = self.config.get("strategy", {}).get("dip_buyer", {})
         rsi_threshold = cfg.get("rsi_oversold", 30)
@@ -40,6 +41,7 @@ class DipBuyer(BaseStrategy):
         vol_multiplier = cfg.get("volume_multiplier", 1.5)
         min_signals = self.config.get("strategy", {}).get("min_signals", 3)
         sentiment_threshold = self.config.get("strategy", {}).get("sentiment_threshold", 0.2)
+        external_threshold = self.config.get("strategy", {}).get("external_threshold", 0.2)
         min_strength = self.config.get("strategy", {}).get("medium_signal_threshold", 60)
 
         reasons = []
@@ -110,6 +112,12 @@ class DipBuyer(BaseStrategy):
             w = weights.get("sentiment", 0.20)
             score += w * 100 * min(1.0, sentiment.bias)   # 依 bias 強度加權
             reasons.append(f"消息面挺多 ({sentiment.summary()})")
+
+        # ── 條件 9: 外部訊號（TradingView 專有指標）──
+        if external is not None and external.supports("LONG", external_threshold):
+            w = weights.get("external", 0.0)
+            score += w * 100 * min(1.0, external.bias)
+            reasons.append(f"外部訊號挺多 ({external.summary()})")
 
         # ── 產生訊號 ──
         signal_type = SignalType.NEUTRAL

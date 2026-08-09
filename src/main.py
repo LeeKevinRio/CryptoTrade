@@ -11,6 +11,7 @@ from src.strategy.base_strategy import SignalType
 from src.risk.position_manager import PositionManager
 from src.execution.order_executor import OrderExecutor
 from src.execution.order_tracker import OrderTracker
+from src.external.store import store as ext_store
 from src.notification.notifier import TelegramNotifier
 from src.sentiment import MarketSentimentProvider
 from src.utils.config import load_config
@@ -211,7 +212,11 @@ class TradeBot:
                              sentiment=None):
         """K 線收盤時的策略評估"""
         bot_state = state.bots[self.bot_id]
-        signal = self.aggregator.evaluate(symbol, candles, funding_rate, sentiment)
+        # 外部訊號（TradingView webhook）；過期者 get() 會回 None
+        external = ext_store.get(symbol)
+        signal = self.aggregator.evaluate(
+            symbol, candles, funding_rate, sentiment, external,
+        )
 
         # 現貨過濾 SHORT
         if self.config.get("only_long") and signal.type == SignalType.SHORT:

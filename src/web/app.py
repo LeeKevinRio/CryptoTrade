@@ -7,11 +7,15 @@ import sys
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Depends
+from fastapi import (
+    FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Depends, Request,
+)
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.external.models import parse_payload
+from src.external.store import store as ext_store
 from src.web.event_bus import bus
 from src.web.state import state
 from src.indicators.rsi import get_current_rsi
@@ -37,6 +41,14 @@ def _liquidation_price(side: str, entry: float, leverage: int) -> float:
     if side == "LONG":
         return entry * (1 - margin_ratio + MAINTENANCE_MARGIN_RATE)
     return entry * (1 + margin_ratio - MAINTENANCE_MARGIN_RATE)
+
+
+def _webhook_ttl() -> float:
+    """外部訊號有效期（秒）。過期訊號不計入評分，避免用陳舊 alert 下單。"""
+    try:
+        return float(os.environ.get("WEBHOOK_TTL_SECONDS", "900"))
+    except ValueError:
+        return 900.0
 
 
 def _bot_or_404(bot_id: str):
@@ -99,6 +111,47 @@ def create_app(tracker=None) -> FastAPI:
                 }
                 for b in state.bots.values()
             ],
+        }
+
+    # ── TradingView Webhook ────────────────────────
+    # TradingView alert 只能設定 URL 與 JSON body，無法帶自訂 header，
+    # 因此以 URL 上的 token 驗證（請使用 HTTPS 或僅限內網暴露）。
+
+    @app.post("/webhook/tradingview/{token}")
+    async def tradingview_webhook(token: str, request: Request):
+        expected = os.environ.get("WEBHOOK_TOKEN") or os.environ.get("WEB_AUTH_TOKEN", "")
+        if not expected or not secrets.compare_digest(token, expected):
+            logger.warning("webhook token 驗證失敗")
+            raise HTTPException(401, "invalid token")
+
+        try:
+            payload = await request.json()
+        except Exception:
+            # TradingView 也可能送純文字，嘗試當成 JSON 解析
+            raw = (await request.body()).decode("utf-8", "replace").strip()
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                raise HTTPException(400, "body 必須是 JSON")
+
+        try:
+            sig = parse_payload(payload, default_ttl=_webhook_ttl())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        if state.symbols and sig.symbol not in state.symbols:
+            logger.warning("webhook 收到未交易的 symbol: %s", sig.symbol)
+            raise HTTPException(400, f"未在交易清單中的 symbol: {sig.symbol}")
+
+        ext_store.put(sig)
+        await bus.publish("external_signal", sig.to_dict())
+        return {"ok": True, "signal": sig.to_dict()}
+
+    @app.get("/api/external_signals")
+    async def get_external_signals():
+        return {
+            "latest": ext_store.all_latest(),
+            "history": ext_store.history(20),
         }
 
     @app.get("/api/overview")
