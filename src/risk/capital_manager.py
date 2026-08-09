@@ -45,6 +45,24 @@ class CapitalManager:
             self._consecutive_losses = 0
             logger.info("每日計數器已重置 (UTC %s)", today)
 
+    def restore_daily_state(
+        self, daily_pnl: float, daily_trades: int, consecutive_losses: int,
+    ):
+        """重啟後從持久化紀錄回填當日風控狀態。
+
+        每日計數器原本只存在記憶體，而 supervisor 會在崩潰時自動重啟，
+        導致每日虧損牆與連敗熔斷在重啟後歸零、形同被繞過。
+        高槓桿下單筆停損就可能吃掉帳戶十幾個百分點，此漏洞必須補上。
+        """
+        self.reset_daily()   # 先處理跨日，避免把昨日數字填進今天
+        self._daily_pnl = daily_pnl
+        self._daily_trades = daily_trades
+        self._consecutive_losses = consecutive_losses
+        logger.info(
+            "風控狀態已還原: 今日 %d 筆, pnl=%.2f, 連敗 %d",
+            daily_trades, daily_pnl, consecutive_losses,
+        )
+
     def can_trade(self, balance: float) -> tuple[bool, str]:
         """檢查是否可以開新倉"""
         self.reset_daily()

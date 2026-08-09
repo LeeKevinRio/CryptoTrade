@@ -52,14 +52,16 @@ def compute_stats(rows: list[dict]) -> dict:
 def reason_bucket(reason: str | None) -> str:
     """把冗長的 close_reason 收斂成幾個大類"""
     r = reason or "未知"
+    # 「時間」必須最先判斷：出場字串如「時間停損(無波動)」「時間停利」同時含有
+    # 停損/停利關鍵字，若順序在後會被誤歸類，導致時間停損在所有報表中隱形。
+    if "時間" in r or "time" in r.lower():
+        return "時間止損 (Time Stop)"
     if "停利" in r or "L1" in r or "L2" in r or "L3" in r:
         return "停利 (Take Profit)"
     if "停損" in r or "stop" in r.lower():
         return "停損 (Stop Loss)"
     if "追蹤" in r or "trailing" in r.lower() or "回撤" in r:
         return "移動停利 (Trailing)"
-    if "時間" in r or "time" in r.lower():
-        return "時間止損 (Time Stop)"
     if "手動" in r or "Web" in r:
         return "手動平倉 (Manual)"
     if "對帳" in r or "啟動" in r:

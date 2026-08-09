@@ -86,8 +86,38 @@ class TradeBot:
         # 啟動時同步 Binance 既有持倉到本地 PM（避免孤兒倉）
         await self._sync_existing_positions()
 
+        # 回填當日風控狀態，避免重啟繞過每日虧損牆／連敗熔斷
+        self._restore_risk_state()
+
         self.logger.info("[%s] 初始化完成 mode=%s 餘額=%.2f", self.bot_id, self.mode, balance)
         return balance
+
+    def _restore_risk_state(self):
+        """從 DB 還原當日已實現損益、交易筆數與連敗數。"""
+        if not self.tracker:
+            return
+        try:
+            stats = self.tracker.get_today_stats(self.bot_id) or {}
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            # 連敗數只計今日（與 reset_daily 的每日歸零語意一致）
+            consecutive = 0
+            for t in self.tracker.get_recent_trades(self.bot_id, limit=50):
+                if not (t.get("exit_time") or "").startswith(today):
+                    break
+                pnl = t.get("pnl")
+                if pnl is None or pnl == 0:
+                    continue          # 平盤不影響連敗串
+                if pnl < 0:
+                    consecutive += 1
+                else:
+                    break             # 遇到獲利即中斷
+            self.position_manager.capital_manager.restore_daily_state(
+                daily_pnl=stats.get("pnl", 0.0),
+                daily_trades=stats.get("trades", 0),
+                consecutive_losses=consecutive,
+            )
+        except Exception as e:  # noqa: BLE001 — 還原失敗不應阻斷啟動
+            self.logger.warning("[%s] 風控狀態還原失敗，以零值啟動: %s", self.bot_id, e)
 
     async def _sync_existing_positions(self):
         """啟動三向對帳：Binance 實際倉、本地 PM、DB OPEN 紀錄三者一致"""

@@ -186,6 +186,37 @@ class TestCapitalManager(unittest.TestCase):
         can, _ = cm.can_trade(10000)
         self.assertTrue(can)
 
+    def test_restore_daily_state_enforces_breakers(self):
+        """重啟還原後，熔斷器應立刻依還原值生效（而非從零重算）"""
+        cfg = {"risk": {**DEFAULT_CONFIG["risk"], "max_consecutive_losses": 3}}
+        cm = CapitalManager(cfg)
+        cm.restore_daily_state(daily_pnl=-50.0, daily_trades=7, consecutive_losses=3)
+        self.assertEqual(cm.daily_trades, 7)
+        self.assertEqual(cm.daily_pnl, -50.0)
+        can, reason = cm.can_trade(10000)
+        self.assertFalse(can)               # 連敗 3 → 應封鎖
+        self.assertIn("連續虧損", reason)
+
+    def test_restore_daily_loss_wall(self):
+        """還原的當日虧損應計入每日虧損牆"""
+        cm = CapitalManager(DEFAULT_CONFIG)   # max_daily_loss_pct = 3.0
+        cm.restore_daily_state(daily_pnl=-310.0, daily_trades=4, consecutive_losses=0)
+        can, reason = cm.can_trade(10000)     # 上限 300
+        self.assertFalse(can)
+        self.assertIn("虧損", reason)
+
+    def test_restore_then_continue_counting(self):
+        """還原後續繼續累計，不會覆蓋"""
+        cfg = {"risk": {**DEFAULT_CONFIG["risk"], "max_consecutive_losses": 3}}
+        cm = CapitalManager(cfg)
+        cm.restore_daily_state(daily_pnl=-20.0, daily_trades=2, consecutive_losses=2)
+        cm.record_trade(-5.0)                 # 第 3 連敗
+        self.assertEqual(cm.consecutive_losses, 3)
+        self.assertEqual(cm.daily_trades, 3)
+        self.assertAlmostEqual(cm.daily_pnl, -25.0)
+        can, _ = cm.can_trade(10000)
+        self.assertFalse(can)
+
     def test_position_size(self):
         cm = CapitalManager(DEFAULT_CONFIG)
         qty = cm.calculate_position_size(
