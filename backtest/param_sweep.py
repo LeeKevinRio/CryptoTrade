@@ -34,11 +34,17 @@ from backtest.run_offline_backtest import generate_realistic_data
 # 路徑相對於扁平 config {"strategy": ..., "risk": ...}
 SWEEP_GRID = {
     # 真實資料掃描顯示停損是主導變數，且最佳值落在舊網格上限，故延伸到 5.0
-    "stop_loss_pct":  (("risk", "stop_loss_pct"),                  [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]),
+    "stop_loss_pct":  (("risk", "stop_loss_pct"),                  [2.0, 3.0, 4.0, 5.0]),
     "level_1_pct":    (("risk", "take_profit", "level_1_pct"),     [0.7, 1.0, 1.5]),
-    "level_2_pct":    (("risk", "take_profit", "level_2_pct"),     [1.5, 2.5, 3.5]),
+    "level_2_pct":    (("risk", "take_profit", "level_2_pct"),     [1.5, 2.5]),
     "level_3_pct":    (("risk", "take_profit", "level_3_pct"),     [3.0, 4.5]),
     "trail_callback": (("risk", "trailing_stop", "callback_pct"),  [0.4, 0.6, 0.8]),
+    # 時間停損：實盤 78% 的出場來源，卻是從未被優化過的參數。
+    # None = 停用時間停損（即先前回測隱含的行為）。
+    "time_stop_seconds": (("risk", "time_stop_seconds"),
+                          [1200, 2400, 3600, 7200, 14400, None]),
+    "time_stop_no_movement_pct": (("risk", "time_stop_no_movement_pct"),
+                                  [0.2, 0.4, 0.8]),
 }
 
 
@@ -69,16 +75,36 @@ def _flat_cfg(bot_cfg: dict) -> dict:
     }
 
 
-def precompute_sides(df, flat_cfg: dict, symbol: str, warmup: int = 50) -> np.ndarray:
+def precompute_sides(df, flat_cfg: dict, symbol: str, warmup: int = 50,
+                     faithful: bool = True, sentiment_replay=None) -> np.ndarray:
     """對每根 K 線算一次進場訊號，回傳 side 陣列（0=無, 1=LONG, -1=SHORT）。
 
     這是掃描裡唯一昂貴的部分（每根重算所有指標）。因為只掃出場參數、進場策略不變，
-    整個網格共用同一份訊號，故只算一次。與 backtester.run 的進場判定完全一致：
-    lookback = 前 200 根、三時框都餵同一份、funding_rate=0。
+    整個網格共用同一份訊號，故只算一次。
+
+    faithful=True（預設）會以真實重取樣的 15m/1h/4h 餵給策略，並回放歷史情緒，
+    使回測評分與實盤一致；faithful=False 保留舊行為（三時框同一份 5m、無情緒），
+    僅供與歷史結果對照。
     """
     aggregator = SignalAggregator(flat_cfg)
     n = len(df)
     sides = np.zeros(n, dtype=np.int8)
+
+    if faithful:
+        from backtest.fidelity import TimeframeSlicer, resample_timeframes
+        slicer = TimeframeSlicer(resample_timeframes(df))
+        idx = df.index
+        for i in range(warmup, n):
+            ts = idx[i]
+            candles = slicer.at(ts)
+            if "5m" not in candles or len(candles["5m"]) < 30:
+                continue
+            sent = sentiment_replay.at(ts, symbol) if sentiment_replay else None
+            signal = aggregator.evaluate(symbol, candles, funding_rate=0.0, sentiment=sent)
+            if signal.is_actionable:
+                sides[i] = 1 if signal.type == SignalType.LONG else -1
+        return sides
+
     for i in range(warmup, n):
         lookback = df.iloc[max(0, i - 200):i + 1]
         candles = {"5m": lookback, "15m": lookback, "1h": lookback}
@@ -91,14 +117,22 @@ def precompute_sides(df, flat_cfg: dict, symbol: str, warmup: int = 50) -> np.nd
 def fast_backtest(
     closes: np.ndarray, highs: np.ndarray, lows: np.ndarray,
     sides: np.ndarray, params: dict, trail_activation: float, warmup: int = 50,
+    bar_seconds: int = 300,
 ) -> list[float]:
     """純出場模擬 — 給定預算好的進場點，套一組出場參數，回傳每筆交易的 pnl%。
 
-    出場邏輯逐行對齊 backtester.run（停損 → 取最高觸發的階梯停利×0.9 滑價 → 移動停利）。
+    出場邏輯對齊實盤：停損 → 階梯停利(×0.9 滑價) → 移動停利 → 時間停損。
+
+    時間停損（實盤 78% 的出場來源，先前完全未模擬）語意同 TakeProfitManager：
+    超時後，若倉位生命週期內 MFE 與 |MAE| 皆 < 門檻視為「無波動」平倉；
+    或 L1 已觸發且當下仍獲利則鎖利出場。params 未給 time_stop_seconds 則停用。
     """
     stop = params["stop_loss_pct"]
     tp_levels = (params["level_1_pct"], params["level_2_pct"], params["level_3_pct"])
     trail_cb = params["trail_callback"]
+    ts_secs = params.get("time_stop_seconds")
+    ts_nomove = params.get("time_stop_no_movement_pct", 0.4)
+    ts_bars = int(ts_secs / bar_seconds) if ts_secs else None
     n = len(closes)
     pnls: list[float] = []
 
@@ -111,6 +145,8 @@ def fast_backtest(
         side = sides[i]
         entry = closes[i]
         highest = 0.0
+        lowest = 0.0          # 生命週期內最差 pnl%（≤0），供時間停損判定無波動
+        l1_hit = False
         trailing = False
         j = i + 1
         exited = False
@@ -126,6 +162,10 @@ def fast_backtest(
                 best = (entry - l) / entry * 100
             if best > highest:
                 highest = best
+            if worst < lowest:
+                lowest = worst
+            if best >= tp_levels[0]:
+                l1_hit = True
 
             reason = None
             if worst <= -stop:
@@ -142,6 +182,13 @@ def fast_backtest(
             if reason is None and trailing and (highest - pnl) >= trail_cb:
                 pnl = highest - trail_cb
                 reason = "trail"
+
+            # 時間停損：語意對齊 TakeProfitManager.check 的第 3 段
+            if reason is None and ts_bars and (j - i) >= ts_bars:
+                if highest < ts_nomove and -lowest < ts_nomove:
+                    reason = "time_nomove"          # 無波動、卡資金 → 以現價出場
+                elif l1_hit and pnl > 0:
+                    reason = "time_lock"            # 動能停滯但仍獲利 → 鎖利
 
             if reason is not None:
                 pnls.append(round(pnl, 2))
@@ -190,7 +237,12 @@ def _row_from_pnls(pnls: list[float], params: dict, baseline=False) -> SweepRow:
 
 def _valid_tp_order(combo: dict) -> bool:
     """三階停利必須嚴格遞增（否則階梯無意義）。"""
-    return combo["level_1_pct"] < combo["level_2_pct"] < combo["level_3_pct"]
+    if not (combo["level_1_pct"] < combo["level_2_pct"] < combo["level_3_pct"]):
+        return False
+    # 時間停損停用時，無波動門檻無作用 → 只保留一種代表，避免重複組合灌大樣本
+    if combo.get("time_stop_seconds") is None:
+        return combo.get("time_stop_no_movement_pct") == 0.4
+    return True
 
 
 RANK_KEYS = {
@@ -202,7 +254,7 @@ RANK_KEYS = {
 
 
 def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pnl",
-              real: bool = False, symbol: str = "BTCUSDT"):
+              real: bool = False, symbol: str = "BTCUSDT", faithful: bool = True):
     config = load_config()
     bot_cfg = config.get("bots", {}).get(bot_id)
     if not bot_cfg:
@@ -222,9 +274,21 @@ def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pn
     highs = df["high"].to_numpy(dtype=float)
     lows = df["low"].to_numpy(dtype=float)
 
+    # ── 情緒回放（讓 sentiment 權重在回測中也能得分，與實盤一致）──
+    replay = None
+    if faithful:
+        from backtest.fidelity import SentimentReplay
+        replay = SentimentReplay.load(days=max(days + 10, 60))
+        if not replay.available:
+            replay = None
+
     # ── 進場訊號只算一次（整個網格共用）──
+    mode_txt = "保真模式：真實 15m/1h/4h 重取樣" + ("＋情緒回放" if replay else "（無情緒歷史）") \
+        if faithful else "舊模式：三時框同一份 5m、無情緒"
+    print(f"  {mode_txt}", flush=True)
     print(f"  計算進場訊號中（{len(df)} 根 K 線，只算一次）...", flush=True)
-    sides = precompute_sides(df, base_flat, symbol)
+    sides = precompute_sides(df, base_flat, symbol, faithful=faithful,
+                             sentiment_replay=replay)
     n_signals = int(np.count_nonzero(sides))
     print(f"  完成：{n_signals} 個可進場訊號\n", flush=True)
 
@@ -237,17 +301,20 @@ def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pn
     base_pnls = fast_backtest(closes, highs, lows, sides, base_params, trail_activation)
     baseline = _row_from_pnls(base_pnls, base_params, baseline=True)
 
-    # ── 保真度檢查：快速模擬 vs 真 Backtester（同一組基準參數應吻合）──
-    real = Backtester(base_flat).run(df, symbol)
-    drift = abs(real.total_pnl_pct - baseline.total_pnl_pct)
-    fidelity = (
-        f"保真度檢查 OK（快速模擬 {baseline.total_pnl_pct:+.2f}% vs "
-        f"真回測 {real.total_pnl_pct:+.2f}%）"
-        if drift < 0.5 and real.total_trades == baseline.trades
-        else f"⚠️ 保真度偏差：模擬 {baseline.total_pnl_pct:+.2f}%/{baseline.trades}筆 "
-             f"vs 真回測 {real.total_pnl_pct:+.2f}%/{real.total_trades}筆"
-    )
-    print(f"  {fidelity}\n", flush=True)
+    # ── 保真度檢查 ──
+    # 舊模式下 Backtester 與 fast_backtest 應完全吻合（驗證出場數學）。
+    # 保真模式下 Backtester 仍是舊行為（假時框、無情緒、無時間停損），
+    # 兩者本就不該相等，故不做比對以免報出假警告。
+    if not faithful:
+        real = Backtester(base_flat).run(df, symbol)
+        drift = abs(real.total_pnl_pct - baseline.total_pnl_pct)
+        ok = drift < 0.5 and real.total_trades == baseline.trades
+        print("  " + (
+            f"保真度檢查 OK（快速模擬 {baseline.total_pnl_pct:+.2f}% vs "
+            f"真回測 {real.total_pnl_pct:+.2f}%）" if ok else
+            f"⚠️ 保真度偏差：模擬 {baseline.total_pnl_pct:+.2f}%/{baseline.trades}筆 "
+            f"vs 真回測 {real.total_pnl_pct:+.2f}%/{real.total_trades}筆"
+        ) + "\n", flush=True)
 
     # ── 笛卡兒積掃描（每組只跑純出場模擬，極快）──
     names = list(SWEEP_GRID.keys())
@@ -281,9 +348,11 @@ def _read_path(cfg: dict, path: tuple):
 
 
 def _fmt_params(p: dict) -> str:
+    ts = p.get("time_stop_seconds")
+    ts_txt = "時停關" if ts is None else f"時停{ts//60}分/{p.get('time_stop_no_movement_pct')}"
     return (
-        f"SL {p['stop_loss_pct']} | TP {p['level_1_pct']}/{p['level_2_pct']}/{p['level_3_pct']} "
-        f"| trail回撤 {p['trail_callback']}"
+        f"SL{p['stop_loss_pct']} TP{p['level_1_pct']}/{p['level_2_pct']}/{p['level_3_pct']} "
+        f"tr{p['trail_callback']} {ts_txt}"
     )
 
 
@@ -356,13 +425,16 @@ def main():
     ap.add_argument("--real", action="store_true",
                     help="使用真實歷史 K 線（Binance 公開端點 + 本地快取）而非模擬資料")
     ap.add_argument("--symbol", default="BTCUSDT", help="--real 時的交易對")
+    ap.add_argument("--legacy", action="store_true",
+                    help="用舊行為（三時框同一份 5m、無情緒、無時間停損）跑，僅供對照")
     args = ap.parse_args()
 
     bot_id, days, tested, min_trades, rank, n_profitable, baseline, top = run_sweep(
         args.bot, args.days, args.min_trades, args.top, args.rank,
-        real=args.real, symbol=args.symbol,
+        real=args.real, symbol=args.symbol, faithful=not args.legacy,
     )
     source = f"真實歷史K線 {args.symbol}" if args.real else "模擬資料(seed=42)"
+    source += "｜舊模式" if args.legacy else "｜保真模式(真時框+情緒回放+時間停損)"
     report = _print_report(bot_id, days, tested, min_trades, rank, n_profitable,
                            baseline, top, source)
     if not args.no_report:
