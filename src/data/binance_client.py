@@ -159,6 +159,26 @@ class BinanceAPI:
             logger.error("%s 設定槓桿 %dx 失敗: %s", symbol, leverage, e)
             raise
 
+    async def set_margin_type(self, symbol: str, margin_type: str = "CROSSED"):
+        """明確設定保證金模式，不依賴帳戶預設值。
+
+        逐倉(ISOLATED)下爆倉線約在 1/槓桿 處，高槓桿會在停損成交前先爆倉；
+        全倉(CROSSED)以整體淨值撐倉，爆倉幅度取決於總名目/淨值。
+        兩者風險特性差異極大，必須顯式指定以確保行為可預期。
+        """
+        try:
+            await self.client.futures_change_margin_type(
+                symbol=symbol, marginType=margin_type
+            )
+            logger.info("%s 保證金模式設為 %s", symbol, margin_type)
+        except BinanceAPIException as e:
+            # -4046: no need to change margin type（已是該模式）
+            if e.code == -4046:
+                logger.info("%s 保證金模式已為 %s", symbol, margin_type)
+                return
+            # 有持倉時無法切換；記錄但不中斷（既有倉沿用原模式）
+            logger.warning("%s 設定保證金模式 %s 失敗: %s", symbol, margin_type, e)
+
     @with_retry()
     async def futures_market_order(
         self, symbol: str, side: str, quantity: float

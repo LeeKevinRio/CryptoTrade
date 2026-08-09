@@ -63,6 +63,11 @@ class OrderExecutor:
                 }
 
                 if self.mode == "futures":
+                    # 先鎖定保證金模式再設槓桿：兩者的爆倉特性差異極大，
+                    # 不可依賴帳戶預設值（詳見 set_margin_type doc）
+                    await self.api.set_margin_type(
+                        symbol, self.config.get("margin_type", "CROSSED"),
+                    )
                     await self.api.set_leverage(symbol, self.leverage)
 
     async def execute_signal(self, signal: Signal, balance: float, candles_df=None) -> dict | None:

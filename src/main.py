@@ -56,6 +56,7 @@ class TradeBot:
             "risk": bot_cfg.get("risk", {}),
             "leverage": bot_cfg.get("leverage", 1),
             "only_long": bot_cfg.get("only_long", False),
+            "margin_type": bot_cfg.get("margin_type", "CROSSED"),
         }
         self.aggregator = SignalAggregator(flat_cfg)
         self.position_manager = PositionManager(flat_cfg)

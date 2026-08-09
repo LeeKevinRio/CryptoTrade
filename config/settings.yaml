@@ -75,8 +75,9 @@ bots:
   futures:
     enabled: true
     mode: futures
-    leverage: 10                    # 15 → 10：配合 4.0% 寬停損保留 2.5x 爆倉緩衝
-                                    # （15x 時爆倉線 6.7% vs 停損 4.0%，僅 1.67x，長影線可能先爆倉）
+    leverage: 25                    # 測試倉激進設定（使用者要求 10x~100x 區間）
+    margin_type: CROSSED            # 明確鎖定全倉：逐倉下 25x 爆倉線約 3.5%，會先於 4% 停損觸發
+                                    # 全倉以整體淨值撐倉，爆倉幅度 ≈ 淨值/總名目，見下方部位配置
     only_long: false
     strategy:
       # ── 激進模式：放寬進場條件以提高交易頻率（使用者明確接受大震盪）──
@@ -122,12 +123,14 @@ bots:
       time_stop_no_movement_pct: 0.4  # 倉位生命週期 max excursion 兩側都 < 0.4% 才視為「無波動」可平
       stop_loss_pct: 4.0            # 1.5 → 4.0：真實資料驗證的核心改動
       max_stop_pct: 6.0             # 上限提高，否則 ATR 動態停損會被預設 4.0 卡死無法放寬
-      # ── 4 個標的 → 提高並行數以實際用到 breadth，並下調單筆以維持總曝險不變 ──
-      # 18% × 4 = 72% 保證金（留 28% 緩衝）；總名目 4 × 1.8x = 7.2x（原 3 × 2.5x = 7.5x）
-      # 同樣曝險分散到 4 個標的，單筆風險反而下降
-      max_position_pct: 18          # 25 → 18
-      max_concurrent_positions: 4   # 3 → 4，讓 4 個標的可同時持有
-      max_daily_loss_pct: 25.0      # 單筆停損虧帳戶 7.2%（4.0% × 1.8x），容納約 3.5 筆
+      # ── 部位公式：notional = 餘額 × max_position_pct × leverage ──
+      # 槓桿與單筆% 是可互換的乘數；全倉下決定生死的是「總名目/淨值」而非槓桿數字
+      #   25x × 12% = 單筆名目 3.0x 帳戶；4 筆並行 → 總名目 12x
+      #   → 爆倉需 4 個標的同向不利約 8.3%（12x 的倒數）
+      # 對照：若維持 18% 不動，25x 會變成總名目 18x → 爆倉僅需 5.6%，過於接近日常波動
+      max_position_pct: 12          # 18 → 12，抵銷槓桿提高，把總名目控制在 12x
+      max_concurrent_positions: 4
+      max_daily_loss_pct: 25.0      # 單筆停損虧帳戶 12%（4.0% × 3.0x），容納約 2 筆
       max_daily_trades: 150         # 50 → 150，配合高頻
       max_consecutive_losses: 5     # 3 → 5，放寬熔斷讓策略有機會跑（仍保留級聯保護）
       entry_batches:
