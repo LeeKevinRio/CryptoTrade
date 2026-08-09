@@ -1,14 +1,29 @@
-version: "3.8"
-
 services:
   cryptotrade-bot:
     build: .
     container_name: cryptotrade-bot
     restart: always
+    # 預設只綁本機。要讓 TradingView webhook 從外網進來，
+    # 請改成 "8899:8899" 並在前面架 HTTPS 反向代理（見 DEPLOY.md）
     ports:
-      - "8788:8788"
+      - "127.0.0.1:8899:8899"
     volumes:
-      - ./logs:/app/logs
+      # data 內含 SQLite 交易紀錄與 K 線快取 —— 必須持久化，
+      # 否則每次重建容器都會遺失全部交易歷史與風控還原依據
       - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      # 設定檔掛載進去，改參數不必重建 image
+      - ./config/settings.yaml:/app/config/settings.yaml:ro
     env_file:
       - .env
+    environment:
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8899
+      DATABASE_URL: sqlite+aiosqlite:////app/data/cryptotrade.db
+      TZ: Asia/Taipei
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

@@ -75,5 +75,19 @@ def load_config(config_path: str = "config/settings.yaml") -> dict:
         "chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
     }
 
+    # ── 環境變數覆寫（容器/雲端部署用）──
+    # 容器內必須綁 0.0.0.0，綁 127.0.0.1 會使 port mapping 無法連入。
+    web = config.setdefault("web", {})
+    if os.getenv("WEB_HOST"):
+        web["host"] = os.getenv("WEB_HOST")
+    if os.getenv("WEB_PORT"):
+        try:
+            web["port"] = int(os.getenv("WEB_PORT"))
+        except ValueError:
+            pass
+    # DB 路徑需指向掛載的 volume，否則重建容器會遺失所有交易紀錄
+    if os.getenv("DATABASE_URL"):
+        config.setdefault("database", {})["url"] = os.getenv("DATABASE_URL")
+
     _validate(config)
     return config
