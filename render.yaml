@@ -1,0 +1,53 @@
+# Render Blueprint — 一鍵部署拿到公開網址 https://<服務名>.onrender.com
+#
+# 使用方式（詳見 DEPLOY.md「零、最快拿到公開網址」）：
+#   1. https://dashboard.render.com → New → Blueprint → 連接本 repo
+#   2. 部署時填入 BINANCE_API_KEY / BINANCE_API_SECRET（testnet 金鑰）
+#   3. 完成後到服務的 Environment 頁複製 WEB_AUTH_TOKEN，
+#      瀏覽器開 https://<服務名>.onrender.com/?token=<WEB_AUTH_TOKEN>
+#
+# ⚠️ free 方案限制：
+#   - 閒置 15 分鐘會休眠（交易迴圈跟著停），有人開網址才醒 —— 只適合「測試」
+#   - 沒有持久磁碟：每次重新部署 SQLite 交易紀錄歸零
+#   要 24/7 不中斷 + 保留紀錄，把 plan 改成 starter 並取消下方 disk 註解。
+
+services:
+  - type: web
+    name: cryptotrade
+    runtime: docker
+    plan: free            # 24/7 執行改為: starter
+    region: singapore     # 靠近幣安；美國節點會被幣安正式環境擋 IP
+    healthCheckPath: /healthz
+    autoDeploy: true      # push 到分支即自動重新部署
+    # plan: starter 時取消註解，交易紀錄才能跨部署保留
+    # disk:
+    #   name: cryptotrade-data
+    #   mountPath: /app/data
+    #   sizeGB: 1
+    envVars:
+      - key: PORT
+        value: "8899"
+      - key: WEB_HOST
+        value: 0.0.0.0
+      - key: WEB_PORT
+        value: "8899"
+      - key: DASHBOARD_AUTH        # 公網必開：整站（含頁面）都要 token
+        value: "true"
+      - key: BINANCE_TESTNET
+        value: "true"
+      - key: BINANCE_API_KEY       # 部署時在 Render 介面填入，不進版控
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+      - key: WEB_AUTH_TOKEN        # Render 自動產生隨機值
+        generateValue: true
+      - key: WEBHOOK_TOKEN         # TradingView webhook 專用 token
+        generateValue: true
+      - key: TELEGRAM_BOT_TOKEN
+        value: ""
+      - key: TELEGRAM_CHAT_ID
+        value: ""
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:////app/data/cryptotrade.db
+      - key: TZ
+        value: Asia/Taipei

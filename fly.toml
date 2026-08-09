@@ -1,0 +1,47 @@
+# Fly.io 部署設定 — 替代方案（約 $2-3/月，24/7 不休眠 + 持久磁碟）
+# 網址形式：https://<app 名稱>.fly.dev
+#
+# 使用方式（詳見 DEPLOY.md「零、最快拿到公開網址」）：
+#   fly launch --no-deploy          # 首次：建立 app（沿用本檔設定）
+#   fly volumes create cryptotrade_data --region sin --size 1
+#   fly secrets set BINANCE_API_KEY=xxx BINANCE_API_SECRET=xxx \
+#       WEB_AUTH_TOKEN=$(openssl rand -hex 24) WEBHOOK_TOKEN=$(openssl rand -hex 24)
+#   fly deploy
+
+app = "cryptotrade"
+primary_region = "sin"      # 新加坡，靠近幣安
+
+[build]
+  # 使用 repo 根目錄的 Dockerfile
+
+[env]
+  WEB_HOST = "0.0.0.0"
+  WEB_PORT = "8899"
+  DASHBOARD_AUTH = "true"   # 公網必開：整站都要 token
+  BINANCE_TESTNET = "true"
+  DATABASE_URL = "sqlite+aiosqlite:////app/data/cryptotrade.db"
+  TZ = "Asia/Taipei"
+
+[http_service]
+  internal_port = 8899
+  force_https = true
+  # 交易 bot 必須常駐 —— 關閉自動休眠
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "60s"
+    timeout = "10s"
+    grace_period = "90s"
+    method = "GET"
+    path = "/healthz"
+
+# SQLite 交易紀錄放持久磁碟，重新部署不遺失
+[mounts]
+  source = "cryptotrade_data"
+  destination = "/app/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
