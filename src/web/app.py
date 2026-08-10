@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import (
     FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Depends, Request,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -49,6 +49,33 @@ def _webhook_ttl() -> float:
         return float(os.environ.get("WEBHOOK_TTL_SECONDS", "900"))
     except ValueError:
         return 900.0
+
+
+# 整站認證的 cookie 名稱（公網部署模式）
+AUTH_COOKIE = "ct_auth"
+
+
+def _dashboard_auth_enabled() -> bool:
+    """DASHBOARD_AUTH=true 時整個儀表板（含 GET 頁面與 WebSocket）都要 token。
+    部署到公網（Render/Fly/VPS 反代）務必開啟；本機/SSH 隧道可維持關閉。
+    """
+    return os.environ.get("DASHBOARD_AUTH", "false").lower() == "true"
+
+
+def _supplied_token(request) -> str | None:
+    """依序從 query string、header、cookie 取出呼叫端提供的 token。
+    Request 與 WebSocket 都有這三個屬性，可共用。
+    """
+    return (
+        request.query_params.get("token")
+        or request.headers.get("x-auth-token")
+        or request.cookies.get(AUTH_COOKIE)
+    )
+
+
+def _token_valid(supplied: str | None) -> bool:
+    expected = os.environ.get("WEB_AUTH_TOKEN", "")
+    return bool(expected and supplied and secrets.compare_digest(supplied, expected))
 
 
 def _bot_or_404(bot_id: str):
@@ -92,7 +119,39 @@ def create_app(tracker=None) -> FastAPI:
     )
     require_auth = _make_auth_dependency()
 
+    # ── 公網模式整站閘門 ──────────────────────────
+    # 豁免 /healthz（平台健康檢查）與 /webhook/*（自帶 token 驗證）。
+    # 瀏覽器首次帶 ?token=xxx 通過後種 cookie，之後同瀏覽器免帶。
+
+    @app.middleware("http")
+    async def dashboard_guard(request: Request, call_next):
+        if not _dashboard_auth_enabled():
+            return await call_next(request)
+        path = request.url.path
+        if path == "/healthz" or path.startswith("/webhook/"):
+            return await call_next(request)
+        if not _token_valid(_supplied_token(request)):
+            return JSONResponse(
+                {"detail": "未授權：請在網址後加 ?token=<WEB_AUTH_TOKEN>"},
+                status_code=401,
+            )
+        response = await call_next(request)
+        if request.query_params.get("token"):
+            response.set_cookie(
+                AUTH_COOKIE,
+                os.environ["WEB_AUTH_TOKEN"],
+                httponly=True,
+                samesite="lax",
+                max_age=7 * 24 * 3600,
+            )
+        return response
+
     # ── 全域狀態 ─────────────────────────────────
+
+    @app.get("/healthz")
+    async def healthz():
+        """無認證健康檢查 — 供 Docker/Render/Fly 探測用"""
+        return {"ok": True}
 
     @app.get("/api/status")
     async def get_status():
@@ -489,6 +548,11 @@ def create_app(tracker=None) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket):
+        # HTTP middleware 不涵蓋 WebSocket，公網模式需在此獨立驗證
+        # （瀏覽器升級請求會自動帶上 dashboard_guard 種下的 cookie）
+        if _dashboard_auth_enabled() and not _token_valid(_supplied_token(websocket)):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         queue = await bus.subscribe()
         try:

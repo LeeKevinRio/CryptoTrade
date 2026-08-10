@@ -1,6 +1,91 @@
 # 雲端部署指南
 
-本機關機就停止交易 → 部署到雲端 VPS 讓它 24/7 執行。
+本機關機就停止交易 → 部署到雲端讓它 24/7 執行。
+
+**只是想要一個網址測試、不想管主機？直接看下面「零、最快拿到公開網址」。**
+要長期跑正式環境、完全掌控機器，再看「一、選擇主機」以後的 VPS 方案。
+
+---
+
+## 零、最快拿到公開網址（免 VPS、免買網域）
+
+部署到 PaaS 平台，平台直接送你一個 HTTPS 網址（如 `https://cryptotrade.onrender.com`），
+手機、任何電腦都能開。repo 已放好兩份現成設定檔：
+
+| 方案 | 設定檔 | 費用 | 適合 |
+|------|--------|------|------|
+| **Render**（推薦入門） | `render.yaml` | 免費起 | 快速測試儀表板 |
+| **Fly.io** | `fly.toml` | 約 $2-3/月 | 24/7 常駐 + 保留交易紀錄 |
+
+### 方案 A：Render（點幾下就完成）
+
+1. 用 GitHub 帳號登入 [dashboard.render.com](https://dashboard.render.com)
+2. **New → Blueprint** → 選擇本 repo（首次需授權 Render 讀取）
+3. Render 會讀取 `render.yaml` 自動帶出所有設定，此時填入兩個欄位：
+   - `BINANCE_API_KEY`、`BINANCE_API_SECRET`：填 **testnet 金鑰**
+     （在 [testnet.binancefuture.com](https://testnet.binancefuture.com) 免費申請，與正式金鑰無關）
+4. 按 **Apply**，等 3-5 分鐘建置完成
+5. 到服務頁面 → **Environment** → 複製自動產生的 `WEB_AUTH_TOKEN`
+6. 瀏覽器打開：
+
+   ```
+   https://<你的服務名>.onrender.com/?token=<WEB_AUTH_TOKEN>
+   ```
+
+   通過一次後會種 cookie，同一瀏覽器之後直接開網址即可。
+
+之後每次 `git push`，Render 會自動重新部署 —— 改完策略推上去就能在網址上看結果。
+
+**免費方案的兩個限制（測試夠用，跑真交易不行）：**
+- 閒置 15 分鐘會休眠，交易迴圈跟著停，有人開網址才醒來
+- 沒有持久磁碟，重新部署後 SQLite 交易紀錄歸零
+
+要 24/7 不中斷：把 `render.yaml` 的 `plan: free` 改成 `plan: starter`（$7/月），
+並取消 `disk:` 區塊的註解讓交易紀錄跨部署保留。
+
+### 方案 B：Fly.io（24/7 常駐 + 持久磁碟）
+
+```bash
+# 安裝 CLI 並登入
+curl -L https://fly.io/install.sh | sh
+fly auth login
+
+# 在 repo 目錄執行（沿用 fly.toml；app 名稱被占用時換一個，網址跟著變）
+fly launch --no-deploy
+fly volumes create cryptotrade_data --region sin --size 1
+fly secrets set \
+  BINANCE_API_KEY=你的testnet金鑰 \
+  BINANCE_API_SECRET=你的testnet秘鑰 \
+  WEB_AUTH_TOKEN=$(openssl rand -hex 24) \
+  WEBHOOK_TOKEN=$(openssl rand -hex 24)
+fly deploy
+
+# 完成後
+fly status          # 看網址：https://<app名稱>.fly.dev
+fly logs            # 看日誌
+```
+
+瀏覽器開 `https://<app名稱>.fly.dev/?token=<你設定的WEB_AUTH_TOKEN>`。
+
+### 公網安全（兩個方案共通）
+
+- `DASHBOARD_AUTH=true` 已在設定檔中開啟：**整個**儀表板（頁面、API、WebSocket）
+  都要 token，沒 token 的人只會看到 401。豁免的只有 `/healthz` 與自帶驗證的 webhook。
+- TradingView alert 的 Webhook URL 填：
+
+  ```
+  https://<你的網址>/webhook/tradingview/<WEBHOOK_TOKEN>
+  ```
+
+  網址是現成 HTTPS，不用再架 Caddy / ngrok。
+- 節點選新加坡（設定檔已指定）：幣安正式環境會擋美國 IP，testnet 也建議照做。
+- 幣安 API 金鑰仍然只開合約交易、不開提幣。
+
+### 想用自己的網域？
+
+兩個平台都支援免費綁定自訂網域（Render: Settings → Custom Domains；
+Fly: `fly certs add 你的網域.com`），到網域商加一筆 CNAME 指過去即可，
+HTTPS 憑證平台自動簽發。沒有網域也完全不影響使用。
 
 ---
 

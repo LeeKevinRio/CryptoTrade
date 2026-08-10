@@ -80,9 +80,11 @@ def load_config(config_path: str = "config/settings.yaml") -> dict:
     web = config.setdefault("web", {})
     if os.getenv("WEB_HOST"):
         web["host"] = os.getenv("WEB_HOST")
-    if os.getenv("WEB_PORT"):
+    # PaaS（Render/Railway 等）以 PORT 指定監聽埠；WEB_PORT 優先
+    port_env = os.getenv("WEB_PORT") or os.getenv("PORT")
+    if port_env:
         try:
-            web["port"] = int(os.getenv("WEB_PORT"))
+            web["port"] = int(port_env)
         except ValueError:
             pass
     # DB 路徑需指向掛載的 volume，否則重建容器會遺失所有交易紀錄

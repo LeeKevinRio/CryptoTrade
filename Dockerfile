@@ -27,7 +27,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8899
 
+# /healthz 不需認證 —— /api/status 在 DASHBOARD_AUTH=true 時會回 401
 HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8899/api/status || exit 1
+    CMD curl -fsS "http://127.0.0.1:${WEB_PORT:-8899}/healthz" || exit 1
 
 CMD ["python", "-m", "src.main"]
