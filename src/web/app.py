@@ -128,7 +128,9 @@ def create_app(tracker=None) -> FastAPI:
         if not _dashboard_auth_enabled():
             return await call_next(request)
         path = request.url.path
-        if path == "/healthz" or path.startswith("/webhook/"):
+        # rstrip 容忍尾斜線（/healthz/）—— 監測服務常自動補斜線，
+        # 擋下會造成健康檢查誤報 401
+        if path.rstrip("/") == "/healthz" or path.startswith("/webhook/"):
             return await call_next(request)
         if not _token_valid(_supplied_token(request)):
             return JSONResponse(
@@ -148,9 +150,11 @@ def create_app(tracker=None) -> FastAPI:
 
     # ── 全域狀態 ─────────────────────────────────
 
-    @app.get("/healthz")
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
     async def healthz():
-        """無認證健康檢查 — 供 Docker/Render/Fly 探測用"""
+        """無認證健康檢查 — 供 Docker/Render/Fly/UptimeRobot 探測用
+        （部分監測服務用 HEAD，不加會回 405 造成誤報）
+        """
         return {"ok": True}
 
     @app.get("/api/status")
