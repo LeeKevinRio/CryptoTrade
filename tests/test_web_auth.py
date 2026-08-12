@@ -28,6 +28,18 @@ def test_healthz_exempt(client):
     assert r.json() == {"ok": True}
 
 
+def test_healthz_trailing_slash_exempt(client):
+    # 監測服務（UptimeRobot 等）可能自動補尾斜線，不可被閘門擋成 401
+    r = client.get("/healthz/", follow_redirects=True)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+
+def test_healthz_head_request(client):
+    # UptimeRobot 部分監測模式用 HEAD
+    assert client.head("/healthz").status_code == 200
+
+
 def test_blocked_without_token(client):
     assert client.get("/api/status").status_code == 401
     assert client.get("/").status_code == 401
