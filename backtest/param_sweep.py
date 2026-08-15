@@ -20,6 +20,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
@@ -254,7 +255,8 @@ RANK_KEYS = {
 
 
 def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pnl",
-              real: bool = False, symbol: str = "BTCUSDT", faithful: bool = True):
+              real: bool = False, symbol: str = "BTCUSDT", faithful: bool = True,
+              dump_csv: str | None = None):
     config = load_config()
     bot_cfg = config.get("bots", {}).get(bot_id)
     if not bot_cfg:
@@ -336,6 +338,25 @@ def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pn
     # 獲利判準是 PF>1（等價於期望值>0），不是 payoff>=1：
     # payoff<1 只要勝率夠高仍可獲利（例：勝率 77% + payoff 0.36 → PF 1.17）
     n_profitable = sum(1 for r in eligible if r.profit_factor > 1.0)
+
+    # 全量結果輸出 — 供跨標的比對（top-N 報表資訊不足以找共同穩健組）
+    if dump_csv:
+        import csv
+        Path(dump_csv).parent.mkdir(parents=True, exist_ok=True)
+        param_cols = list(SWEEP_GRID.keys())
+        with open(dump_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(param_cols + [
+                "trades", "win_rate", "total_pnl_pct", "payoff",
+                "profit_factor", "expectancy_pct", "max_dd_pct",
+            ])
+            for r in eligible:
+                w.writerow(
+                    [r.params.get(c) for c in param_cols]
+                    + [r.trades, r.win_rate, r.total_pnl_pct, r.payoff,
+                       r.profit_factor, r.expectancy_pct, r.max_dd_pct]
+                )
+        print(f"  📄 全量結果已寫入 {dump_csv}（{len(eligible)} 組）", flush=True)
 
     return bot_id, days, tested, min_trades, rank, n_profitable, baseline, eligible[:top]
 
@@ -427,11 +448,14 @@ def main():
     ap.add_argument("--symbol", default="BTCUSDT", help="--real 時的交易對")
     ap.add_argument("--legacy", action="store_true",
                     help="用舊行為（三時框同一份 5m、無情緒、無時間停損）跑，僅供對照")
+    ap.add_argument("--dump-csv", default=None,
+                    help="把全部合格組合的完整指標寫成 CSV（供跨標的比對）")
     args = ap.parse_args()
 
     bot_id, days, tested, min_trades, rank, n_profitable, baseline, top = run_sweep(
         args.bot, args.days, args.min_trades, args.top, args.rank,
         real=args.real, symbol=args.symbol, faithful=not args.legacy,
+        dump_csv=args.dump_csv,
     )
     source = f"真實歷史K線 {args.symbol}" if args.real else "模擬資料(seed=42)"
     source += "｜舊模式" if args.legacy else "｜保真模式(真時框+情緒回放+時間停損)"

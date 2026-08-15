@@ -49,12 +49,14 @@ jobs:
         env:
           BINANCE_API_KEY: backtest-offline
           BINANCE_API_SECRET: backtest-offline
-        run: python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --rank expectancy --min-trades 15
+        run: python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --rank expectancy --min-trades 15 --dump-csv reports/sweep-full-${{ matrix.symbol }}.csv
 
       - uses: actions/upload-artifact@v4
         with:
           name: sweep-${{ matrix.symbol }}
-          path: reports/sweep-*.md
+          path: |
+            reports/sweep-*.md
+            reports/sweep-full-*.csv
           if-no-files-found: error
 
   collect:
@@ -74,7 +76,7 @@ jobs:
       - name: 提交報告回分支
         run: |
           mkdir -p reports
-          cp /tmp/sweep-artifacts/*.md reports/ 2>/dev/null || true
+          cp /tmp/sweep-artifacts/*.md /tmp/sweep-artifacts/*.csv reports/ 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add reports/
