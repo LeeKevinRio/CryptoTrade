@@ -45,6 +45,10 @@ jobs:
         run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days ${{ inputs.days || '90' }}
 
       - name: 參數掃描（保真模式）
+        # load_config() 強制要求 API 金鑰，但離線回測不會呼叫 API — 給占位值
+        env:
+          BINANCE_API_KEY: backtest-offline
+          BINANCE_API_SECRET: backtest-offline
         run: python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --rank expectancy --min-trades 15
 
       - uses: actions/upload-artifact@v4
