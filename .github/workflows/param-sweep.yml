@@ -1,0 +1,75 @@
+# 參數掃描（真實 K 線、保真模式）— 在 GitHub Actions 上跑，不佔用本機/交易主機
+#
+# 手動觸發：Actions 頁面 → 參數掃描 → Run workflow
+# 四個交易對平行掃描，完成後把 reports/sweep-*.md 提交回觸發的分支。
+
+name: 參數掃描（真實K線）
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "回測天數"
+        required: false
+        default: "90"
+
+permissions:
+  contents: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+
+      - name: 下載真實歷史 K 線
+        # fetch_klines 內建三層資料源 fallback（fapi → spot → data-api 鏡像），
+        # 美國機房被幣安主站擋 IP 時會自動退到公開鏡像
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days ${{ inputs.days || '90' }}
+
+      - name: 參數掃描（保真模式）
+        run: python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --rank expectancy --min-trades 15
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ matrix.symbol }}
+          path: reports/sweep-*.md
+          if-no-files-found: error
+
+  collect:
+    needs: sweep
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/sweep-artifacts
+          merge-multiple: true
+
+      - name: 提交報告回分支
+        run: |
+          mkdir -p reports
+          cp /tmp/sweep-artifacts/*.md reports/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          git diff --cached --quiet && echo "沒有新報告" && exit 0
+          git commit -m "docs: 參數掃描報表（Actions 自動產出，${{ inputs.days || '90' }} 天）"
+          git push
