@@ -1,0 +1,2 @@
+# 更新此檔並 push 即觸發參數掃描 workflow（見 .github/workflows/param-sweep.yml）
+# 觸發紀錄：2026-08-15 四標的 90 天保真掃描

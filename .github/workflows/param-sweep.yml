@@ -12,6 +12,10 @@ on:
         description: "回測天數"
         required: false
         default: "90"
+  # 整合權限無法手動 dispatch 時的替代觸發：更新觸發檔即開跑
+  push:
+    paths:
+      - "backtest/.sweep-trigger"
 
 permissions:
   contents: write
