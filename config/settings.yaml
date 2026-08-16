@@ -128,6 +128,10 @@ bots:
         level_2_close_pct: 35
         level_3_pct: 3.0
         level_3_close_pct: 25
+      # 階梯停利掛成 reduce-only + post-only 限價單（maker 費率約為 taker 一半）。
+      # 淨EV僅 0.03~0.06%/筆而來回 taker 費約 0.08%，省下的費用直接放大淨利。
+      # 軟體端保留 trailing / 時停 / 停損備援；掛單成交由 30s 對帳入帳。
+      use_maker_tp: true
       trailing_stop:
         activation_pct: 1.0
         callback_pct: 0.4
