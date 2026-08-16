@@ -42,7 +42,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: trend-${{ matrix.symbol }}
-          path: reports/sweep-full-trend-*.csv
+          path: reports/sweep-full-trend-${{ matrix.symbol }}.csv
           if-no-files-found: error
 
   collect:

@@ -40,7 +40,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: entry-${{ matrix.symbol }}
-          path: reports/entry-sweep-*.csv
+          path: reports/entry-sweep-${{ matrix.symbol }}.csv
           if-no-files-found: error
 
   collect:

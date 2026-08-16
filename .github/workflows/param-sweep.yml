@@ -60,9 +60,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sweep-${{ matrix.symbol }}
+          # 只上傳本 job 產生的檔案（萬用字元會把 checkout 的舊報告一起帶上，
+          # 同名檔在 merge-multiple 時互相覆蓋導致損毀）
           path: |
-            reports/sweep-*.md
-            reports/sweep-full-*.csv
+            reports/sweep-futures-real-${{ matrix.symbol }}-*.md
+            reports/sweep-full-${{ matrix.symbol }}.csv
           if-no-files-found: error
 
   collect:

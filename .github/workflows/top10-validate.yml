@@ -58,7 +58,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: top10-${{ matrix.symbol }}
-          path: reports/sweep-full-*.csv
+          # 只上傳本 job 產生的檔案 —— 萬用字元會把 checkout 進來的舊報告
+          # 一起上傳，同名檔在 merge-multiple 時互相覆蓋導致內容損毀
+          path: reports/sweep-full-${{ matrix.symbol }}.csv
           if-no-files-found: error
 
   collect:
