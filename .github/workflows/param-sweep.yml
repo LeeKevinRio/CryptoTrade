@@ -16,6 +16,9 @@ on:
   push:
     paths:
       - "backtest/.sweep-trigger"
+  # 每週一 04:00 UTC（台北 12:00）自動重新驗證 —— 參數會隨市場過期
+  schedule:
+    - cron: "0 4 * * 1"
 
 permissions:
   contents: write
@@ -27,7 +30,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+        # 前四個為現役交易對；其餘為候選（依 24h 成交額挑選的流動性標的），
+        # 通過「扣費後淨EV>0」檢定者才會加入 trading.symbols
+        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT,
+                 XRPUSDT, DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, LTCUSDT]
     steps:
       - uses: actions/checkout@v4
 
