@@ -1,0 +1,87 @@
+# TOP10 成交量標的自動檢定 — 抓 24h 成交量排名 → 每標的 90 天全網格掃描
+# 產出 sweep-full-*.csv 供「扣費後淨EV > 0」檢定，通過者由人工/助手更新 settings.yaml
+# 觸發：更新 backtest/.top10-trigger 並 push
+
+name: TOP10成交量檢定
+
+on:
+  push:
+    paths:
+      - "backtest/.top10-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  rank:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      symbols: ${{ steps.top.outputs.symbols }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 抓成交量排名
+        id: top
+        run: |
+          python -m backtest.top_volume --top 10
+          echo "symbols=$(python -m backtest.top_volume --top 10 --json)" >> "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: rank
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: ${{ fromJSON(needs.rank.outputs.symbols) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+      - name: 下載真實歷史 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 90
+      - name: 全網格掃描
+        env:
+          BINANCE_API_KEY: backtest-offline
+          BINANCE_API_SECRET: backtest-offline
+        run: |
+          python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} \
+            --days 90 --rank expectancy --min-trades 15 --no-report \
+            --dump-csv reports/sweep-full-${{ matrix.symbol }}.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: top10-${{ matrix.symbol }}
+          path: reports/sweep-full-*.csv
+          if-no-files-found: error
+
+  collect:
+    needs: [rank, sweep]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          merge-multiple: true
+      - name: 提交報告回分支
+        run: |
+          mkdir -p reports
+          cp /tmp/artifacts/*.csv reports/ 2>/dev/null || true
+          echo '${{ needs.rank.outputs.symbols }}' > reports/top10-ranking.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && echo "沒有新報告" && exit 0
+          git commit -m "docs: TOP10 成交量標的檢定報表（Actions 自動產出）"
+          git push
