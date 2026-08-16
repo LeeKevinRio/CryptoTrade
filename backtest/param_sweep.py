@@ -256,11 +256,15 @@ RANK_KEYS = {
 
 def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pnl",
               real: bool = False, symbol: str = "BTCUSDT", faithful: bool = True,
-              dump_csv: str | None = None):
+              dump_csv: str | None = None, trend_filter: bool | None = None):
     config = load_config()
     bot_cfg = config.get("bots", {}).get(bot_id)
     if not bot_cfg:
         raise SystemExit(f"config 找不到 bot: {bot_id}")
+    if trend_filter is not None:
+        # A/B 對照用：強制覆寫趨勢過濾開關（不動 settings.yaml）
+        bot_cfg.setdefault("strategy", {}).setdefault("trend_filter", {})["enabled"] = trend_filter
+        print(f"  趨勢過濾: {'開' if trend_filter else '關'}（CLI 覆寫）", flush=True)
 
     if real:
         import asyncio
@@ -450,12 +454,15 @@ def main():
                     help="用舊行為（三時框同一份 5m、無情緒、無時間停損）跑，僅供對照")
     ap.add_argument("--dump-csv", default=None,
                     help="把全部合格組合的完整指標寫成 CSV（供跨標的比對）")
+    ap.add_argument("--trend-filter", default=None, choices=["on", "off"],
+                    help="強制開/關高時框趨勢過濾（A/B 對照用，預設依 settings.yaml）")
     args = ap.parse_args()
 
     bot_id, days, tested, min_trades, rank, n_profitable, baseline, top = run_sweep(
         args.bot, args.days, args.min_trades, args.top, args.rank,
         real=args.real, symbol=args.symbol, faithful=not args.legacy,
         dump_csv=args.dump_csv,
+        trend_filter=None if args.trend_filter is None else args.trend_filter == "on",
     )
     source = f"真實歷史K線 {args.symbol}" if args.real else "模擬資料(seed=42)"
     source += "｜舊模式" if args.legacy else "｜保真模式(真時框+情緒回放+時間停損)"

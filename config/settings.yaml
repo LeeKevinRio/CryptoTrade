@@ -101,6 +101,14 @@ bots:
                                       # 調高時請同步下修其他權重，維持總和 1.0
       sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
       external_threshold: 0.2         # |bias| >= 此值才把外部訊號計入評分
+      # 高時框趨勢閘門：4h EMA 斜率向下擋多單、向上擋空單（只擋不加分）
+      # ⚠️ 預設關閉 —— 等 CI 的 A/B 保真回測證明四標的淨EV有改善再開
+      trend_filter:
+        enabled: false
+        timeframe: "4h"
+        ema_period: 50
+        slope_lookback: 6             # 斜率取 6 根 4h（一天）
+        slope_threshold_pct: 0.3      # |斜率| < 0.3% 視為中性不過濾
       dip_buyer:
         rsi_oversold: 38            # 32 → 38，超賣判定放寬，訊號變多
         rsi_15m_threshold: 45

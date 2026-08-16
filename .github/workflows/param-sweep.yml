@@ -85,6 +85,7 @@ jobs:
           cp /tmp/sweep-artifacts/*.md /tmp/sweep-artifacts/*.csv reports/ 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
           git add reports/
           git diff --cached --quiet && echo "沒有新報告" && exit 0
           git commit -m "docs: 參數掃描報表（Actions 自動產出，${{ inputs.days || '90' }} 天）"
