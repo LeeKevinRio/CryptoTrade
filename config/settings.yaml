@@ -1,15 +1,17 @@
 # === CryptoTrade 全域設定 ===
 
 trading:
-  # 交易對經真實 K 線驗證（45天，含手續費）才納入；期望值為負者不加入
-  #   BTCUSDT +0.074%/筆  ETHUSDT +0.232%  SOLUSDT +0.304%  BNBUSDT +0.457%
-  #   排除：XRPUSDT -0.046%、DOGEUSDT -0.016%
-  # 增加標的是在不降低訊號品質的前提下提高頻率（1.58 → 3.05 筆/天）
+  # 交易對須通過「現行出場參數 + 扣費 0.08%/筆 後淨EV > 0」檢定才納入
+  # （2026-08-16 90天真實K線全網格，見 reports/sweep-full-*.csv）：
+  #   現役  BTC +0.033  ETH +0.027  SOL +0.048  BNB +0.056  DOGE +0.094（%/筆）
+  #   排除  XRP -0.415  ADA -0.075  AVAX -0.027  LINK -0.022  LTC -0.034
+  # 注意：被排除者用「各自最佳參數」可為正，但那是單標的過擬合，不採用
   symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
     - BNBUSDT
+    - DOGEUSDT
   timeframes:
     - 1m
     - 5m
