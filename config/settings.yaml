@@ -87,6 +87,9 @@ bots:
     only_long: false
     strategy:
       # ── 激進模式：放寬進場條件以提高交易頻率（使用者明確接受大震盪）──
+      # 2026-08-16 進場網格掃描（18 組 × 四標的、扣費後）：本組即最佳。
+      # medium=50 是實際守門員（45 過鬆四標的無法全正、55 過緊）；
+      # min_signals 2/3/4 與 strong 62/70 對結果無差異。詳 reports/entry-sweep-*.csv
       min_signals: 3                # 4 → 3，較少共振條件即可進場
       strong_signal_threshold: 62   # 70 → 62，較容易觸發全額建倉
       medium_signal_threshold: 50   # 62 → 50，同時是 is_actionable 門檻（原寫死 60，現已可設定）
@@ -157,8 +160,10 @@ bots:
       #   25x × 12% = 單筆名目 3.0x 帳戶；4 筆並行 → 總名目 12x
       #   → 爆倉需 4 個標的同向不利約 8.3%（12x 的倒數）
       # 對照：若維持 18% 不動，25x 會變成總名目 18x → 爆倉僅需 5.6%，過於接近日常波動
-      max_position_pct: 12          # 18 → 12，抵銷槓桿提高，把總名目控制在 12x
-      max_concurrent_positions: 4
+      # 5 標的全開時 5 × 10% × 25x = 總名目 12.5x（與原 4 × 12% 的 12x 相當）
+      # → 併發從 4 提到 5 讓第五個幣的訊號不被擋，同時總風險維持不變
+      max_position_pct: 10          # 12 → 10，抵銷併發 +1
+      max_concurrent_positions: 5   # 4 → 5，配合 DOGEUSDT 加入
       max_daily_loss_pct: 25.0      # 單筆停損虧帳戶 12%（4.0% × 3.0x），容納約 2 筆
       max_daily_trades: 150         # 50 → 150，配合高頻
       max_consecutive_losses: 5     # 3 → 5，放寬熔斷讓策略有機會跑（仍保留級聯保護）
