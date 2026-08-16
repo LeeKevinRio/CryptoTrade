@@ -104,7 +104,10 @@ bots:
       sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
       external_threshold: 0.2         # |bias| >= 此值才把外部訊號計入評分
       # 高時框趨勢閘門：4h EMA 斜率向下擋多單、向上擋空單（只擋不加分）
-      # ⚠️ 預設關閉 —— 等 CI 的 A/B 保真回測證明四標的淨EV有改善再開
+      # 2026-08-16 A/B 結論（90天、現行出場參數、扣費後）：維持關閉。
+      #   BTC +0.7% ETH +5.9% BNB +1.8% 改善，但 SOL 淨EV 轉負（-16.0%），
+      #   合計淨盈虧 +18.2% → +10.7%，不符「4/4 皆改善才開」的預定標準。
+      #   工具鏈保留（trend-ab workflow），市場結構改變時可重測。
       trend_filter:
         enabled: false
         timeframe: "4h"
