@@ -6,12 +6,21 @@ trading:
   #   現役  BTC +0.033  ETH +0.027  SOL +0.048  BNB +0.056  DOGE +0.094（%/筆）
   #   排除  XRP -0.415  ADA -0.075  AVAX -0.027  LINK -0.022  LTC -0.034
   # 注意：被排除者用「各自最佳參數」可為正，但那是單標的過擬合，不採用
+  # 2026-08-16 成交量 TOP10 檢定（同標準）新增五標的：
+  #   XPL +0.126  ALLO +0.156  HEMI +0.130  PLUME +0.249  CHIP +0.056（淨EV %/筆）
+  #   排除 UUSDT -0.073。⚠️ 新上市幣的優勢量測自上市初期行情，
+  #   每週一自動重掃會持續覆核，轉負即應移除
   symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
     - BNBUSDT
     - DOGEUSDT
+    - XPLUSDT
+    - ALLOUSDT
+    - HEMIUSDT
+    - PLUMEUSDT
+    - CHIPUSDT
   timeframes:
     - 1m
     - 5m

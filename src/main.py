@@ -546,11 +546,19 @@ class TradeOrchestrator:
                     logger.error("載入 %s %s K線失敗: %s", sym, tf, e)
                     failed.append((sym, tf))
         if failed:
-            # 主時框（5m）失敗就拒絕啟動，避免無資料下單
-            critical = [pair for pair in failed if pair[1] in ("5m", "15m")]
-            if critical:
+            # 主時框（5m/15m）失敗的「標的」自動剔除，其餘標的照常交易 ——
+            # 使用者可自由增減 symbols，單一標的打錯字/未上市不應癱瘓整台 bot
+            bad_symbols = {pair[0] for pair in failed if pair[1] in ("5m", "15m")}
+            if bad_symbols:
+                # 就地修改：bots 在建構時持有同一個 list 參照，需一併生效
+                self.symbols[:] = [s for s in self.symbols if s not in bad_symbols]
+                logger.warning(
+                    "⚠️ 剔除無法載入關鍵K線的標的: %s（剩餘: %s）",
+                    sorted(bad_symbols), self.symbols,
+                )
+            if not self.symbols:
                 raise RuntimeError(
-                    f"關鍵 K 線載入失敗，拒絕啟動: {critical}"
+                    f"所有標的的關鍵 K 線都載入失敗，拒絕啟動: {sorted(bad_symbols)}"
                 )
 
     async def _on_kline(self, data: dict):

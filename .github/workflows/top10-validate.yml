@@ -1,26 +1,42 @@
-# 趨勢過濾器 A/B 驗證 — 四個現役標的，趨勢過濾開啟版的全量出場掃描
-# 與主掃描（過濾關閉）的 sweep-full-*.csv 比對同一組出場參數的淨EV，
-# 四標的皆有改善才在 settings.yaml 開啟 trend_filter。
-# 觸發：更新 backtest/.trend-ab-trigger 並 push
+# TOP10 成交量標的自動檢定 — 抓 24h 成交量排名 → 每標的 90 天全網格掃描
+# 產出 sweep-full-*.csv 供「扣費後淨EV > 0」檢定，通過者由人工/助手更新 settings.yaml
+# 觸發：更新 backtest/.top10-trigger 並 push
 
-name: 趨勢過濾A/B
+name: TOP10成交量檢定
 
 on:
   push:
     paths:
-      - "backtest/.trend-ab-trigger"
+      - "backtest/.top10-trigger"
 
 permissions:
   contents: write
 
 jobs:
-  sweep-trend-on:
+  rank:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      symbols: ${{ steps.top.outputs.symbols }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 抓成交量排名
+        id: top
+        run: |
+          python -m backtest.top_volume --top 10
+          echo "symbols=$(python -m backtest.top_volume --top 10 --json)" >> "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: rank
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+        symbol: ${{ fromJSON(needs.rank.outputs.symbols) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,22 +47,24 @@ jobs:
         run: pip install -r requirements.txt
       - name: 下載真實歷史 K 線
         run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 90
-      - name: 掃描（趨勢過濾開）
+      - name: 全網格掃描
         env:
           BINANCE_API_KEY: backtest-offline
           BINANCE_API_SECRET: backtest-offline
         run: |
           python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} \
-            --days 90 --rank expectancy --min-trades 15 --trend-filter on \
-            --no-report --dump-csv reports/sweep-full-trend-${{ matrix.symbol }}.csv
+            --days 90 --rank expectancy --min-trades 15 --no-report \
+            --dump-csv reports/sweep-full-${{ matrix.symbol }}.csv
       - uses: actions/upload-artifact@v4
         with:
-          name: trend-${{ matrix.symbol }}
-          path: reports/sweep-full-trend-${{ matrix.symbol }}.csv
+          name: top10-${{ matrix.symbol }}
+          # 只上傳本 job 產生的檔案 —— 萬用字元會把 checkout 進來的舊報告
+          # 一起上傳，同名檔在 merge-multiple 時互相覆蓋導致內容損毀
+          path: reports/sweep-full-${{ matrix.symbol }}.csv
           if-no-files-found: error
 
   collect:
-    needs: sweep-trend-on
+    needs: [rank, sweep]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -61,10 +79,11 @@ jobs:
         run: |
           mkdir -p reports
           cp /tmp/artifacts/*.csv reports/ 2>/dev/null || true
+          echo '${{ needs.rank.outputs.symbols }}' > reports/top10-ranking.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin ${{ github.ref_name }} || true
           git add reports/
           git diff --cached --quiet && echo "沒有新報告" && exit 0
-          git commit -m "docs: 趨勢過濾 A/B 掃描報表（Actions 自動產出）"
+          git commit -m "docs: TOP10 成交量標的檢定報表（Actions 自動產出）"
           git push
