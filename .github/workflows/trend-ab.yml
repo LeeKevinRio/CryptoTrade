@@ -1,0 +1,70 @@
+# 趨勢過濾器 A/B 驗證 — 四個現役標的，趨勢過濾開啟版的全量出場掃描
+# 與主掃描（過濾關閉）的 sweep-full-*.csv 比對同一組出場參數的淨EV，
+# 四標的皆有改善才在 settings.yaml 開啟 trend_filter。
+# 觸發：更新 backtest/.trend-ab-trigger 並 push
+
+name: 趨勢過濾A/B
+
+on:
+  push:
+    paths:
+      - "backtest/.trend-ab-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  sweep-trend-on:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+      - name: 下載真實歷史 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 90
+      - name: 掃描（趨勢過濾開）
+        env:
+          BINANCE_API_KEY: backtest-offline
+          BINANCE_API_SECRET: backtest-offline
+        run: |
+          python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} \
+            --days 90 --rank expectancy --min-trades 15 --trend-filter on \
+            --no-report --dump-csv reports/sweep-full-trend-${{ matrix.symbol }}.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trend-${{ matrix.symbol }}
+          path: reports/sweep-full-trend-*.csv
+          if-no-files-found: error
+
+  collect:
+    needs: sweep-trend-on
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          merge-multiple: true
+      - name: 提交報告回分支
+        run: |
+          mkdir -p reports
+          cp /tmp/artifacts/*.csv reports/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && echo "沒有新報告" && exit 0
+          git commit -m "docs: 趨勢過濾 A/B 掃描報表（Actions 自動產出）"
+          git push

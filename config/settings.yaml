@@ -1,15 +1,17 @@
 # === CryptoTrade 全域設定 ===
 
 trading:
-  # 交易對經真實 K 線驗證（45天，含手續費）才納入；期望值為負者不加入
-  #   BTCUSDT +0.074%/筆  ETHUSDT +0.232%  SOLUSDT +0.304%  BNBUSDT +0.457%
-  #   排除：XRPUSDT -0.046%、DOGEUSDT -0.016%
-  # 增加標的是在不降低訊號品質的前提下提高頻率（1.58 → 3.05 筆/天）
+  # 交易對須通過「現行出場參數 + 扣費 0.08%/筆 後淨EV > 0」檢定才納入
+  # （2026-08-16 90天真實K線全網格，見 reports/sweep-full-*.csv）：
+  #   現役  BTC +0.033  ETH +0.027  SOL +0.048  BNB +0.056  DOGE +0.094（%/筆）
+  #   排除  XRP -0.415  ADA -0.075  AVAX -0.027  LINK -0.022  LTC -0.034
+  # 注意：被排除者用「各自最佳參數」可為正，但那是單標的過擬合，不採用
   symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
     - BNBUSDT
+    - DOGEUSDT
   timeframes:
     - 1m
     - 5m
@@ -85,6 +87,9 @@ bots:
     only_long: false
     strategy:
       # ── 激進模式：放寬進場條件以提高交易頻率（使用者明確接受大震盪）──
+      # 2026-08-16 進場網格掃描（18 組 × 四標的、扣費後）：本組即最佳。
+      # medium=50 是實際守門員（45 過鬆四標的無法全正、55 過緊）；
+      # min_signals 2/3/4 與 strong 62/70 對結果無差異。詳 reports/entry-sweep-*.csv
       min_signals: 3                # 4 → 3，較少共振條件即可進場
       strong_signal_threshold: 62   # 70 → 62，較容易觸發全額建倉
       medium_signal_threshold: 50   # 62 → 50，同時是 is_actionable 門檻（原寫死 60，現已可設定）
@@ -101,6 +106,17 @@ bots:
                                       # 調高時請同步下修其他權重，維持總和 1.0
       sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
       external_threshold: 0.2         # |bias| >= 此值才把外部訊號計入評分
+      # 高時框趨勢閘門：4h EMA 斜率向下擋多單、向上擋空單（只擋不加分）
+      # 2026-08-16 A/B 結論（90天、現行出場參數、扣費後）：維持關閉。
+      #   BTC +0.7% ETH +5.9% BNB +1.8% 改善，但 SOL 淨EV 轉負（-16.0%），
+      #   合計淨盈虧 +18.2% → +10.7%，不符「4/4 皆改善才開」的預定標準。
+      #   工具鏈保留（trend-ab workflow），市場結構改變時可重測。
+      trend_filter:
+        enabled: false
+        timeframe: "4h"
+        ema_period: 50
+        slope_lookback: 6             # 斜率取 6 根 4h（一天）
+        slope_threshold_pct: 0.3      # |斜率| < 0.3% 視為中性不過濾
       dip_buyer:
         rsi_oversold: 38            # 32 → 38，超賣判定放寬，訊號變多
         rsi_15m_threshold: 45
@@ -128,6 +144,10 @@ bots:
         level_2_close_pct: 35
         level_3_pct: 3.0
         level_3_close_pct: 25
+      # 階梯停利掛成 reduce-only + post-only 限價單（maker 費率約為 taker 一半）。
+      # 淨EV僅 0.03~0.06%/筆而來回 taker 費約 0.08%，省下的費用直接放大淨利。
+      # 軟體端保留 trailing / 時停 / 停損備援；掛單成交由 30s 對帳入帳。
+      use_maker_tp: true
       trailing_stop:
         activation_pct: 1.0
         callback_pct: 0.4
@@ -140,8 +160,10 @@ bots:
       #   25x × 12% = 單筆名目 3.0x 帳戶；4 筆並行 → 總名目 12x
       #   → 爆倉需 4 個標的同向不利約 8.3%（12x 的倒數）
       # 對照：若維持 18% 不動，25x 會變成總名目 18x → 爆倉僅需 5.6%，過於接近日常波動
-      max_position_pct: 12          # 18 → 12，抵銷槓桿提高，把總名目控制在 12x
-      max_concurrent_positions: 4
+      # 5 標的全開時 5 × 10% × 25x = 總名目 12.5x（與原 4 × 12% 的 12x 相當）
+      # → 併發從 4 提到 5 讓第五個幣的訊號不被擋，同時總風險維持不變
+      max_position_pct: 10          # 12 → 10，抵銷併發 +1
+      max_concurrent_positions: 5   # 4 → 5，配合 DOGEUSDT 加入
       max_daily_loss_pct: 25.0      # 單筆停損虧帳戶 12%（4.0% × 3.0x），容納約 2 筆
       max_daily_trades: 150         # 50 → 150，配合高頻
       max_consecutive_losses: 5     # 3 → 5，放寬熔斷讓策略有機會跑（仍保留級聯保護）

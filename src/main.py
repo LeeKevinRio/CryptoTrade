@@ -324,6 +324,13 @@ class TradeBot:
                                 symbol=symbol, quantity=qty, reason=reason,
                             )
                             if result:
+                                # 部分平倉不寫 DB（已實現損益累積在倉位上，
+                                # 最終全平時一次記錄），只廣播事件
+                                if result.get("partial"):
+                                    await bus.publish(
+                                        f"partial_close.{self.bot_id}", result,
+                                    )
+                                    continue
                                 self.tracker.record_close(
                                     trade_id=result.get("trade_id"),
                                     symbol=symbol,
@@ -356,6 +363,28 @@ class TradeBot:
                 exch_symbols = set(state.exchange_positions.keys())
                 for symbol in list(self.position_manager.all_positions.keys()):
                     if symbol in exch_symbols:
+                        # 兩邊都有 → 校正數量差（maker TP 掛單成交 / 批次進場成交）
+                        exch_qty = state.exchange_positions[symbol]["quantity"]
+                        est_price = self.candle_manager.get_latest_price(symbol)
+                        if est_price is None:
+                            try:
+                                est_price = await self.api.get_ticker_price(symbol)
+                            except Exception:
+                                continue
+                        partial = self.position_manager.sync_external_fill(
+                            symbol, exch_qty, est_price,
+                        )
+                        if partial:
+                            partial.update({
+                                "reason": "階梯停利(maker 掛單成交)",
+                                "bot_id": self.bot_id,
+                                "mode": self.mode,
+                            })
+                            self.logger.info(
+                                "[%s] 🎯 對帳入帳 TP 掛單成交 %s qty=%.4f pnl=%.4f",
+                                self.bot_id, symbol, partial["quantity"], partial["pnl"],
+                            )
+                            await bus.publish(f"partial_close.{self.bot_id}", partial)
                         continue
                     # Binance 上已沒這個倉位 → 視為已被交易所端停損平掉
                     pos = self.position_manager.get_position(symbol)

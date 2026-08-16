@@ -1,0 +1,73 @@
+# 每週績效快照 — 從線上儀表板拉 /api/performance 存進 repo
+#
+# 需要先在 GitHub repo 設定兩個 Actions secrets（Settings → Secrets → Actions）：
+#   DASHBOARD_URL    = https://你的服務名.onrender.com（結尾不要斜線）
+#   WEB_AUTH_TOKEN   = 儀表板的認證 token（與 Render 環境變數一致）
+# 未設定 secrets 時本 workflow 直接跳過，不會失敗。
+
+name: 每週績效快照
+
+on:
+  schedule:
+    - cron: "30 3 * * 1"     # 每週一 03:30 UTC（台北 11:30）
+  push:
+    paths:
+      - "backtest/.weekly-stats-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取線上績效並產出報告
+        env:
+          DASHBOARD_URL: ${{ secrets.DASHBOARD_URL }}
+          WEB_AUTH_TOKEN: ${{ secrets.WEB_AUTH_TOKEN }}
+        run: |
+          if [ -z "$DASHBOARD_URL" ] || [ -z "$WEB_AUTH_TOKEN" ]; then
+            echo "未設定 DASHBOARD_URL / WEB_AUTH_TOKEN secrets，跳過快照"
+            exit 0
+          fi
+          mkdir -p reports
+          DATE=$(date -u +%F)
+          # 儀表板可能在休眠，先打 healthz 喚醒並重試
+          for i in 1 2 3 4 5; do
+            curl -sf -m 60 "$DASHBOARD_URL/healthz" && break || sleep 30
+          done
+          curl -sf -m 60 -H "X-Auth-Token: $WEB_AUTH_TOKEN" \
+            "$DASHBOARD_URL/api/performance?days=7" \
+            -o "reports/weekly-perf-$DATE.json"
+          python3 - <<'EOF'
+          import glob, json
+          path = sorted(glob.glob("reports/weekly-perf-*.json"))[-1]
+          d = json.load(open(path))
+          o = d.get("overall", {})
+          lines = [
+              f"# 每週績效快照（{path.split('-perf-')[1][:10]}，近 7 天）", "",
+              f"- 已平倉：{o.get('n', 0)} 筆（勝 {o.get('wins', 0)} / 負 {o.get('losses', 0)}）",
+              f"- 總損益：{o.get('total_pnl', 0):+.2f} USDT",
+              f"- 勝率：{o.get('win_rate_wl', 0):.1f}%　盈虧比：{o.get('payoff', 0):.2f}　PF：{o.get('profit_factor', 0):.2f}",
+              f"- 期望值：{o.get('expectancy', 0):+.2f} USDT/筆", "",
+              "## 按出場原因", "",
+          ]
+          for r in d.get("by_reason", []):
+              lines.append(f"- {r['key']}：{r['n']} 筆，{r['total_pnl']:+.2f}（平均 {r['avg']:+.2f}）")
+          md = path.replace(".json", ".md")
+          open(md, "w").write("\n".join(lines) + "\n")
+          print(f"寫入 {md}")
+          EOF
+
+      - name: 提交快照
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/ || true
+          git diff --cached --quiet && echo "沒有新快照" && exit 0
+          git commit -m "docs: 每週績效快照（Actions 自動產出）"
+          git push

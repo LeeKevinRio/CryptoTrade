@@ -181,44 +181,60 @@ class BinanceAPI:
 
     @with_retry()
     async def futures_market_order(
-        self, symbol: str, side: str, quantity: float
+        self, symbol: str, side: str, quantity: float, reduce_only: bool = False
     ) -> dict:
-        order = await self.client.futures_create_order(
+        params: dict[str, Any] = dict(
             symbol=symbol,
             side=side,
             type=FUTURE_ORDER_TYPE_MARKET,
             quantity=quantity,
         )
+        # 平倉單一律 reduceOnly：即使數量計算或狀態不同步，也絕不會反向開新倉
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        order = await self.client.futures_create_order(**params)
         logger.info("市價單成交: %s %s %s qty=%s", symbol, side, order["orderId"], quantity)
         return order
 
     @with_retry()
     async def futures_limit_order(
-        self, symbol: str, side: str, quantity: float, price: float
+        self, symbol: str, side: str, quantity: float, price: float,
+        time_in_force: str = TIME_IN_FORCE_GTC, reduce_only: bool = False,
     ) -> dict:
-        order = await self.client.futures_create_order(
+        params: dict[str, Any] = dict(
             symbol=symbol,
             side=side,
             type=FUTURE_ORDER_TYPE_LIMIT,
-            timeInForce=TIME_IN_FORCE_GTC,
+            timeInForce=time_in_force,   # GTX = post-only，只當 maker（吃單會被拒）
             quantity=quantity,
             price=str(price),
         )
-        logger.info("限價單掛出: %s %s price=%s qty=%s", symbol, side, price, quantity)
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        order = await self.client.futures_create_order(**params)
+        logger.info("限價單掛出: %s %s price=%s qty=%s tif=%s", symbol, side, price, quantity, time_in_force)
         return order
 
     @with_retry()
     async def futures_stop_market(
-        self, symbol: str, side: str, quantity: float, stop_price: float
+        self, symbol: str, side: str, stop_price: float,
+        quantity: float | None = None, close_position: bool = False,
     ) -> dict:
-        order = await self.client.futures_create_order(
+        params: dict[str, Any] = dict(
             symbol=symbol,
             side=side,
             type="STOP_MARKET",
             stopPrice=str(stop_price),
-            quantity=quantity,
         )
-        logger.info("停損市價單: %s %s stop=%s qty=%s", symbol, side, stop_price, quantity)
+        # closePosition=true：觸發時平掉「當下」整個倉位 ——
+        # 部分停利成交後數量會變，固定 quantity 的停損單會多平而反向開倉
+        if close_position:
+            params["closePosition"] = "true"
+        else:
+            params["quantity"] = quantity
+        order = await self.client.futures_create_order(**params)
+        logger.info("停損市價單: %s %s stop=%s %s", symbol, side, stop_price,
+                    "closePosition" if close_position else f"qty={quantity}")
         return order
 
     async def futures_take_profit_market(

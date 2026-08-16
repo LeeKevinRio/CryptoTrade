@@ -64,6 +64,9 @@ class TakeProfitManager:
         self.time_stop_no_movement_pct = config.get("risk", {}).get(
             "time_stop_no_movement_pct", 0.4,
         )
+        # 交易所掛單模式：階梯停利由掛在幣安的 reduce-only 限價單成交（maker 費率），
+        # 軟體端只做觸價標記與追蹤/時停/停損備援，不再對階梯發市價平倉（taker）
+        self.exchange_ladder = config.get("risk", {}).get("use_maker_tp", False)
 
         # {symbol: TakeProfitState}
         self._states: dict[str, TakeProfitState] = {}
@@ -94,6 +97,15 @@ class TakeProfitManager:
     def remove_position(self, symbol: str):
         self._states.pop(symbol, None)
 
+    def sync_remaining(self, symbol: str, exchange_qty: float, grew: bool = False):
+        """對帳同步剩餘數量（交易所掛單模式：TP 限價成交/批次進場成交後校正）"""
+        state = self._states.get(symbol)
+        if not state:
+            return
+        state.remaining_quantity = exchange_qty
+        if grew and exchange_qty > state.total_quantity:
+            state.total_quantity = exchange_qty
+
     def check(self, symbol: str, current_price: float) -> list[dict]:
         """
         檢查是否觸發停利條件
@@ -109,8 +121,16 @@ class TakeProfitManager:
         actions = []
 
         # ── 1. 階梯式停利 ──
+        # 交易所掛單模式：只做觸價標記（成交與數量由對帳同步入帳），不發市價單
         for level in state.levels:
             if not level.triggered and pnl_pct >= level.pct:
+                if self.exchange_ladder:
+                    level.triggered = True
+                    logger.info(
+                        "🎯 %s 階梯 L%d 觸價 +%.2f%%（交易所掛單模式，等待對帳確認成交）",
+                        symbol, state.levels.index(level) + 1, pnl_pct,
+                    )
+                    continue
                 close_qty = state.total_quantity * (level.close_pct / 100)
                 close_qty = min(close_qty, state.remaining_quantity)
                 if close_qty > 0:

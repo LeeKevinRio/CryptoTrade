@@ -87,6 +87,22 @@ fly logs            # 看日誌
 Fly: `fly certs add 你的網域.com`），到網域商加一筆 CNAME 指過去即可，
 HTTPS 憑證平台自動簽發。沒有網域也完全不影響使用。
 
+### 自動化體檢（GitHub Actions，已內建）
+
+repo 已設定三條自動化管線（`.github/workflows/`），全部在 GitHub 免費額度內執行：
+
+| workflow | 觸發 | 產出 |
+|---|---|---|
+| 參數掃描 | 每週一 04:00 UTC + 更新 `backtest/.sweep-trigger` | 10 標的出場參數全網格 → `reports/sweep-*.md` + `sweep-full-*.csv` |
+| 進場參數掃描 | 更新 `backtest/.entry-sweep-trigger` | 進場門檻網格 → `reports/entry-sweep-*.csv` |
+| 每週績效快照 | 每週一 03:30 UTC + 更新 `backtest/.weekly-stats-trigger` | 線上實盤近 7 天績效 → `reports/weekly-perf-*.{json,md}` |
+
+**每週績效快照需要設定兩個 secrets** 才會生效（沒設會自動跳過）：
+GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+
+- `DASHBOARD_URL`：`https://你的服務名.onrender.com`（結尾不要斜線）
+- `WEB_AUTH_TOKEN`：與 Render 環境變數中相同的 token
+
 ---
 
 ## 一、選擇主機

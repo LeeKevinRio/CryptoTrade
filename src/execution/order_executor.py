@@ -166,12 +166,19 @@ class OrderExecutor:
                 if stop_price:
                     close_side = "SELL" if pos_side == "LONG" else "BUY"
                     try:
+                        # closePosition：部分停利成交後仍精確平掉剩餘倉位
                         await self.api.futures_stop_market(
-                            symbol=symbol, side=close_side, quantity=filled_qty,
+                            symbol=symbol, side=close_side,
                             stop_price=self._round_price(symbol, stop_price),
+                            close_position=True,
                         )
                     except Exception as e:
                         self.logger.warning("停損單掛出失敗: %s", e)
+
+                # maker 停利階梯：reduce-only + post-only 限價單掛在交易所，
+                # 成交吃 maker 費率（taker 一半以下），由 reconcile 對帳入帳
+                if self.config.get("risk", {}).get("use_maker_tp", False):
+                    await self._place_tp_ladder(symbol, pos_side, entry_price, filled_qty)
 
             result = {
                 "bot_id": self.bot_id,
@@ -192,6 +199,30 @@ class OrderExecutor:
             self.logger.error("開倉失敗 %s: %s", symbol, e)
             return None
 
+    async def _place_tp_ladder(self, symbol: str, pos_side: str,
+                               entry_price: float, quantity: float):
+        """把三階停利掛成 reduce-only + post-only(GTX) 限價單（maker 費率）"""
+        tp_cfg = self.config.get("risk", {}).get("take_profit", {})
+        close_side = "SELL" if pos_side == "LONG" else "BUY"
+        sign = 1 if pos_side == "LONG" else -1
+        for i in (1, 2, 3):
+            pct = tp_cfg.get(f"level_{i}_pct")
+            close_pct = tp_cfg.get(f"level_{i}_close_pct")
+            if not pct or not close_pct:
+                continue
+            qty = self._round_qty(symbol, quantity * close_pct / 100)
+            if qty <= 0:
+                continue
+            price = self._round_price(symbol, entry_price * (1 + sign * pct / 100))
+            try:
+                await self.api.futures_limit_order(
+                    symbol=symbol, side=close_side, quantity=qty, price=price,
+                    time_in_force="GTX", reduce_only=True,
+                )
+            except Exception as e:
+                # 單一階失敗不阻斷：軟體端 trailing/時停/停損仍完整備援
+                self.logger.warning("TP L%d 掛單失敗 %s: %s", i, symbol, e)
+
     async def close_position(self, symbol: str, quantity: float, reason: str) -> dict | None:
         # per-symbol 鎖：防止 risk_loop 與 web close 同時觸發雙重平倉
         async with self.pm.lock_for(symbol):
@@ -201,12 +232,13 @@ class OrderExecutor:
                 return None
 
             close_side = "SELL" if pos.side == "LONG" else "BUY"
-            qty = self._round_qty(symbol, quantity)
+            qty = self._round_qty(symbol, min(quantity, pos.quantity))
             if qty <= 0:
                 return None
+            is_partial = qty < pos.quantity - 1e-12
 
             try:
-                order = await self._place_market(symbol, close_side, qty)
+                order = await self._place_market(symbol, close_side, qty, reduce_only=True)
                 exit_price = float(order.get("avgPrice", 0) or 0)
                 if exit_price == 0:
                     try:
@@ -214,20 +246,23 @@ class OrderExecutor:
                     except Exception:
                         exit_price = pos.entry_price  # 最後 fallback
 
-                result = self.pm.close_position(symbol, exit_price)
+                result = self.pm.close_position(symbol, exit_price, quantity=qty)
                 if result:
                     result["reason"] = reason
                     result["bot_id"] = self.bot_id
                     result["mode"] = self.mode
-                self.logger.info("✅ 平倉: %s reason=%s", symbol, reason)
+                self.logger.info("✅ %s平倉: %s reason=%s",
+                                 "部分" if is_partial else "", symbol, reason)
 
-                try:
-                    if self.mode == "futures":
-                        await self.api.cancel_all_orders(symbol)
-                    else:
-                        await self.api.spot_cancel_all_orders(symbol)
-                except Exception:
-                    pass
+                # 部分平倉：保留停損(closePosition)與未觸發的 TP 掛單，不可全取消
+                if not is_partial:
+                    try:
+                        if self.mode == "futures":
+                            await self.api.cancel_all_orders(symbol)
+                        else:
+                            await self.api.spot_cancel_all_orders(symbol)
+                    except Exception:
+                        pass
 
                 return result
             except Exception as e:
@@ -248,9 +283,12 @@ class OrderExecutor:
                     pass
         return fallback
 
-    async def _place_market(self, symbol: str, side: str, qty: float) -> dict:
+    async def _place_market(self, symbol: str, side: str, qty: float,
+                            reduce_only: bool = False) -> dict:
         if self.mode == "futures":
-            return await self.api.futures_market_order(symbol=symbol, side=side, quantity=qty)
+            return await self.api.futures_market_order(
+                symbol=symbol, side=side, quantity=qty, reduce_only=reduce_only,
+            )
         return await self.api.spot_market_order(symbol=symbol, side=side, quantity=qty)
 
     def _round_qty(self, symbol: str, quantity: float) -> float:

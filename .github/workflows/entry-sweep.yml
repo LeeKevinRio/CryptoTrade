@@ -1,0 +1,68 @@
+# 進場參數網格掃描 — 固定出場參數，掃 min_signals / 門檻
+# 每組都要全量重算訊號，較耗時（每標的約 30-90 分鐘）
+# 觸發：更新 backtest/.entry-sweep-trigger 並 push
+
+name: 進場參數掃描
+
+on:
+  push:
+    paths:
+      - "backtest/.entry-sweep-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  entry-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+      - name: 下載真實歷史 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 90
+      - name: 進場掃描
+        env:
+          BINANCE_API_KEY: backtest-offline
+          BINANCE_API_SECRET: backtest-offline
+        run: |
+          python -m backtest.entry_sweep --symbol ${{ matrix.symbol }} --days 90 \
+            --dump-csv reports/entry-sweep-${{ matrix.symbol }}.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: entry-${{ matrix.symbol }}
+          path: reports/entry-sweep-*.csv
+          if-no-files-found: error
+
+  collect:
+    needs: entry-sweep
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          merge-multiple: true
+      - name: 提交報告回分支
+        run: |
+          mkdir -p reports
+          cp /tmp/artifacts/*.csv reports/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && echo "沒有新報告" && exit 0
+          git commit -m "docs: 進場參數掃描報表（Actions 自動產出）"
+          git push
