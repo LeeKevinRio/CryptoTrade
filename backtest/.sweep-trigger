@@ -1,0 +1,4 @@
+# 更新此檔並 push 即觸發參數掃描 workflow（見 .github/workflows/param-sweep.yml）
+# 觸發紀錄：2026-08-15 四標的 90 天保真掃描
+# 觸發紀錄：2026-08-15 #2 修正 load_config 需要 API 金鑰占位值
+# 觸發紀錄：2026-08-15 #3 加 --dump-csv 全量輸出供跨標的比對

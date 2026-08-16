@@ -112,14 +112,15 @@ bots:
         funding_rate_high: 0.02     # 0.03 → 0.02
         resistance_tolerance_pct: 0.8
     risk:
-      # ── 出場參數：保真回測 + 4 標的樣本外驗證（90天真實K線，已扣手續費）──
-      # 修好回測保真度（真時框重取樣＋情緒回放＋時間停損模擬）後重新驗證，
-      # 先前基於不忠實回測的參數全部失效。跨標的合計淨報酬：
-      #   前一版 SL4.0/tr0.4/時停40分  → BTC -12.8 ETH -1.6 SOL -12.6 BNB -4.9 = -32.0（0/4 正）
-      #   BTC 掃描第1名 SL3.0/tr0.8/時停240分 → 僅 BTC 正，其餘全負 = -34.5（1/4）純過擬合
-      #   本組   SL3.0/tr0.4/時停20分   → BTC +1.7 ETH +1.6 SOL -10.1 BNB +6.6 = -0.2（3/4 正）
-      # 本組是唯一 3/4 標的為正、期望值約零的組合；其餘皆顯著為負。
-      # ⚠️ 期望值僅「約等於零」，非已證實的 edge。用 scripts/check_edge.py 持續追蹤。
+      # ── 出場參數：2026-08-16 全網格跨標的驗證（90天真實K線，保真模式）──
+      # 方法：四標的各掃 1920 組全量輸出，每組扣來回手續費 0.08%/筆 後，
+      # 要求四標的淨期望值同時 > 0（僅 10/1920 組通過），按最差標的淨EV排序。
+      # 第1名（本組）SL4.0/tr0.4/時停40分/0.2：
+      #   淨EV  BTC +0.033  ETH +0.027  SOL +0.048  BNB +0.056（%/筆，4/4 正）
+      #   勝率 75~81%，合計淨盈虧 +18.2%，總筆數 450（90天）
+      # 對照前組 SL3.0/tr0.4/時停20分/0.2：BTC 淨EV -0.078 轉負（筆數多、手續費侵蝕），3/4 正。
+      # 完整數據：reports/sweep-full-*.csv、reports/sweep-futures-real-*-2026-08-15.md
+      # ⚠️ 淨EV僅 +0.03~0.06%/筆，屬微弱優勢。用 scripts/check_edge.py 持續追蹤。
       take_profit:
         level_1_pct: 1.5
         level_1_close_pct: 40
@@ -130,9 +131,9 @@ bots:
       trailing_stop:
         activation_pct: 1.0
         callback_pct: 0.4
-      time_stop_seconds: 1200         # 2400 → 1200（20分）：跨標的驗證最穩健
-      time_stop_no_movement_pct: 0.2  # 0.4 → 0.2，無波動判定收緊
-      stop_loss_pct: 3.0              # 4.0 → 3.0
+      time_stop_seconds: 2400         # 1200 → 2400（40分）：20分過急，churn 多、手續費侵蝕
+      time_stop_no_movement_pct: 0.2
+      stop_loss_pct: 4.0              # 3.0 → 4.0：空頭高波動窗口 3% 易被掃損後反彈
       max_stop_pct: 6.0               # 上限保留，讓 ATR 動態停損仍可放寬
       # ── 部位公式：notional = 餘額 × max_position_pct × leverage ──
       # 槓桿與單筆% 是可互換的乘數；全倉下決定生死的是「總名目/淨值」而非槓桿數字
