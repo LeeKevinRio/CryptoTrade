@@ -527,13 +527,16 @@ class TradeOrchestrator:
             pass
 
     async def stop(self):
+        was_running = self.running
         self.running = False
         for bot in self.bots.values():
             bot.stop()
         if self.ws_feed:
             await self.ws_feed.stop()
         await self.api.disconnect()
-        await self.notifier.send("🛑 *CryptoTrade 已停止*")
+        # 啟動失敗後的清理不發通知，避免退避重試循環對 Telegram 洗版
+        if was_running:
+            await self.notifier.send("🛑 *CryptoTrade 已停止*")
 
     async def _load_historical_candles(self):
         failed = []
@@ -599,17 +602,25 @@ class TradeOrchestrator:
             await bot.on_kline_close(symbol, candles, funding_rate, sentiment)
 
 
+RETRY_DELAY_SECONDS = 60
+
+
 async def main():
     config = load_config()
     log_cfg = config.get("logging", {})
     setup_logger("cryptotrade", log_cfg.get("level", "INFO"), log_cfg.get("file"))
 
-    orchestrator = TradeOrchestrator(config)
+    # 交易引擎建構失敗（如 DB 問題）不應阻止儀表板啟動 —— 保持可觀測
+    orchestrator: TradeOrchestrator | None = None
+    try:
+        orchestrator = TradeOrchestrator(config)
+    except Exception as e:  # noqa: BLE001
+        logger.error("交易引擎建構失敗，稍後重試: %s", e)
 
     web_cfg = config.get("web", {})
     web_enabled = web_cfg.get("enabled", True)
     if web_enabled:
-        app = create_app(tracker=orchestrator.tracker)
+        app = create_app(tracker=orchestrator.tracker if orchestrator else None)
         web_task = asyncio.create_task(serve_web(
             app,
             host=web_cfg.get("host", "0.0.0.0"),
@@ -619,10 +630,39 @@ async def main():
     else:
         web_task = None
 
+    # 引擎失敗（交易所斷線 / 金鑰失效 / 測試網重置）→ 記錄後退避重試，
+    # 絕不讓整個程序退出：程序退出會拖垮儀表板並讓平台陷入重啟循環(503)
     try:
-        await orchestrator.start()
-    except KeyboardInterrupt:
-        await orchestrator.stop()
+        while True:
+            if orchestrator is None:
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                try:
+                    orchestrator = TradeOrchestrator(config)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("交易引擎重建失敗，%d 秒後重試: %s", RETRY_DELAY_SECONDS, e)
+                    orchestrator = None
+                continue
+            try:
+                await orchestrator.start()
+                break  # stop() 正常結束
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                await orchestrator.stop()
+                break
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "⚠️ 交易引擎異常（%s），%d 秒後重試。儀表板持續運作中",
+                    e, RETRY_DELAY_SECONDS,
+                )
+                try:
+                    await orchestrator.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                try:
+                    orchestrator = TradeOrchestrator(config)
+                except Exception as e2:  # noqa: BLE001
+                    logger.error("交易引擎重建失敗: %s", e2)
+                    orchestrator = None
     finally:
         if web_task:
             web_task.cancel()
