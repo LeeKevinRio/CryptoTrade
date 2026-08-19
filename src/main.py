@@ -298,6 +298,23 @@ class TradeBot:
             await bus.publish(f"order_open.{self.bot_id}", result)
         return result
 
+    async def balance_loop(self):
+        """每 60 秒刷新餘額 — 原本只在啟動讀一次，啟動瞬間 API 失敗會讓
+        儀表板永遠顯示 0.00 直到下一筆交易"""
+        while self.running:
+            await asyncio.sleep(60)
+            try:
+                if self.mode == "futures":
+                    balance = await self.api.get_usdt_balance()
+                else:
+                    balance = await self.api.get_spot_usdt_balance()
+            except Exception as e:  # noqa: BLE001 — 失敗保留舊值，不覆蓋成 0
+                self.logger.debug("[%s] 餘額刷新失敗（保留舊值）: %s", self.bot_id, e)
+                continue
+            bot_state = state.bots.get(self.bot_id)
+            if bot_state:
+                bot_state.balance = balance
+
     async def risk_loop(self):
         """每秒檢查持倉風控"""
         while self.running:
@@ -496,6 +513,7 @@ class TradeOrchestrator:
             bot.running = True
             asyncio.create_task(bot.risk_loop())
             asyncio.create_task(bot.reconcile_loop())
+            asyncio.create_task(bot.balance_loop())
 
         # 啟 WebSocket — market 由「是否有 futures bot」決定
         has_futures_bot = any(b.mode == "futures" for b in self.bots.values())
