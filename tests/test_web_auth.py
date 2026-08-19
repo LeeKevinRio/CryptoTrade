@@ -81,6 +81,15 @@ def test_websocket_accepts_query_token(client):
         pass
 
 
+def test_diag_endpoint(client):
+    r = client.get("/api/diag", params={"token": TOKEN})
+    assert r.status_code == 200
+    body = r.json()
+    assert "engine" in body and "probes" in body
+    # 引擎未啟動時要優雅回報而非爆炸
+    assert body["probes"].get("note")
+
+
 def test_disabled_mode_keeps_open_dashboard(client_no_auth):
     # 預設（本機）行為不變：GET 免認證
     assert client_no_auth.get("/api/status").status_code == 200

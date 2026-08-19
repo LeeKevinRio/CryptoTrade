@@ -32,6 +32,11 @@ class GlobalState:
     bots: dict[str, BotState] = field(default_factory=dict)
     # 由 reconcile_loop 維護的真實 Binance 持倉資訊（含實際爆倉價）
     exchange_positions: dict[str, dict] = field(default_factory=dict)
+    # 引擎生命週期狀態 — main 的重試迴圈寫入，/api/diag 讀取
+    # {"phase": "starting|running|retrying|dead", "error": str, "ts": str, "attempts": int}
+    engine_status: dict[str, Any] = field(default_factory=dict)
+    # 引擎的 BinanceAPI 參照，供 /api/diag 現場探測
+    api_ref: Any = None
 
 
 state = GlobalState()
