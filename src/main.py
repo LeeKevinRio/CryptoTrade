@@ -537,6 +537,10 @@ class TradeOrchestrator:
         )
 
         self.running = True
+        state.engine_status = {
+            "phase": "running", "error": None,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
         logger.info("Orchestrator 已啟動，監聽行情中...")
         try:
             while self.running:
@@ -628,12 +632,20 @@ async def main():
     log_cfg = config.get("logging", {})
     setup_logger("cryptotrade", log_cfg.get("level", "INFO"), log_cfg.get("file"))
 
+    def _mark(phase: str, error: str | None = None, attempts: int = 0):
+        state.engine_status = {
+            "phase": phase, "error": error,
+            "ts": datetime.now(timezone.utc).isoformat(), "attempts": attempts,
+        }
+
     # 交易引擎建構失敗（如 DB 問題）不應阻止儀表板啟動 —— 保持可觀測
     orchestrator: TradeOrchestrator | None = None
     try:
         orchestrator = TradeOrchestrator(config)
+        state.api_ref = orchestrator.api
     except Exception as e:  # noqa: BLE001
         logger.error("交易引擎建構失敗，稍後重試: %s", e)
+        _mark("retrying", f"建構失敗: {e}")
 
     web_cfg = config.get("web", {})
     web_enabled = web_cfg.get("enabled", True)
@@ -650,27 +662,34 @@ async def main():
 
     # 引擎失敗（交易所斷線 / 金鑰失效 / 測試網重置）→ 記錄後退避重試，
     # 絕不讓整個程序退出：程序退出會拖垮儀表板並讓平台陷入重啟循環(503)
+    attempts = 0
     try:
         while True:
             if orchestrator is None:
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
                 try:
                     orchestrator = TradeOrchestrator(config)
+                    state.api_ref = orchestrator.api
                 except Exception as e:  # noqa: BLE001
+                    attempts += 1
                     logger.error("交易引擎重建失敗，%d 秒後重試: %s", RETRY_DELAY_SECONDS, e)
+                    _mark("retrying", f"重建失敗: {e}", attempts)
                     orchestrator = None
                 continue
             try:
+                _mark("starting", attempts=attempts)
                 await orchestrator.start()
                 break  # stop() 正常結束
             except (KeyboardInterrupt, asyncio.CancelledError):
                 await orchestrator.stop()
                 break
             except Exception as e:  # noqa: BLE001
+                attempts += 1
                 logger.error(
                     "⚠️ 交易引擎異常（%s），%d 秒後重試。儀表板持續運作中",
                     e, RETRY_DELAY_SECONDS,
                 )
+                _mark("retrying", str(e), attempts)
                 try:
                     await orchestrator.stop()
                 except Exception:  # noqa: BLE001
@@ -678,8 +697,10 @@ async def main():
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
                 try:
                     orchestrator = TradeOrchestrator(config)
+                    state.api_ref = orchestrator.api
                 except Exception as e2:  # noqa: BLE001
                     logger.error("交易引擎重建失敗: %s", e2)
+                    _mark("retrying", f"重建失敗: {e2}", attempts)
                     orchestrator = None
     finally:
         if web_task:

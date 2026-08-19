@@ -157,6 +157,34 @@ def create_app(tracker=None) -> FastAPI:
         """
         return {"ok": True}
 
+    @app.get("/api/diag")
+    async def diag():
+        """自我診斷 — 引擎狀態 + 現場探測交易所連線/K線/餘額。
+        引擎連不上交易所時，使用者無需翻主機日誌即可取得確切錯誤。
+        """
+        out = {
+            "engine": state.engine_status or {"phase": "unknown", "error": None},
+            "testnet": state.testnet,
+            "symbols": state.symbols,
+            "bots": list(state.bots.keys()),
+            "probes": {},
+        }
+        api = state.api_ref
+        if api is None:
+            out["probes"]["note"] = "引擎尚未建構 API 連線（等待重試）"
+            return out
+
+        async def probe(name, coro):
+            try:
+                result = await coro
+                out["probes"][name] = {"ok": True, "result": str(result)[:200]}
+            except Exception as e:  # noqa: BLE001 — 診斷端點要吞下一切錯誤如實回報
+                out["probes"][name] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+        await probe("kline_BTCUSDT_5m", api.get_klines("BTCUSDT", "5m", limit=1))
+        await probe("usdt_balance", api.get_usdt_balance())
+        return out
+
     @app.get("/api/status")
     async def get_status():
         return {
