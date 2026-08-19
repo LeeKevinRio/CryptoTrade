@@ -36,13 +36,17 @@ class OrderExecutor:
         self._symbol_info: dict[str, dict] = {}
 
     async def init_symbol_info(self, symbols: list[str]):
-        for symbol in symbols:
-            if self.mode == "futures":
-                info = await self.api.get_symbol_info(symbol)
-            else:
-                info = await self.api.get_spot_symbol_info(symbol)
+        # 任何單一標的初始化失敗（不支援的槓桿/缺合約資訊）→ 剔除該標的續行，
+        # 不可拖垮整個引擎（例：測試網上新幣槓桿上限低於設定值曾致全面停擺）
+        for symbol in list(symbols):
+            try:
+                if self.mode == "futures":
+                    info = await self.api.get_symbol_info(symbol)
+                else:
+                    info = await self.api.get_spot_symbol_info(symbol)
+                if not info:
+                    raise RuntimeError("查無合約/交易對資訊")
 
-            if info:
                 qty_precision = 3
                 price_precision = 2
                 min_qty = 0.001
@@ -68,7 +72,31 @@ class OrderExecutor:
                     await self.api.set_margin_type(
                         symbol, self.config.get("margin_type", "CROSSED"),
                     )
-                    await self.api.set_leverage(symbol, self.leverage)
+                    eff_lev = await self._set_leverage_with_fallback(symbol)
+                    self._symbol_info[symbol]["leverage"] = eff_lev
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning("⚠️ %s 初始化失敗，剔除此標的: %s", symbol, e)
+                self._symbol_info.pop(symbol, None)
+                if symbol in symbols:
+                    symbols.remove(symbol)   # 就地移除，orchestrator/bots 共用同一 list
+
+    async def _set_leverage_with_fallback(self, symbol: str) -> int:
+        """設定槓桿；標的不支援設定值時自動退到其允許的最大槓桿。"""
+        try:
+            await self.api.set_leverage(symbol, self.leverage)
+            return self.leverage
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "-4028" not in msg and "not valid" not in msg.lower():
+                raise
+        max_lev = await self.api.get_max_leverage(symbol)
+        eff = max(1, min(self.leverage, max_lev))
+        await self.api.set_leverage(symbol, eff)
+        self.logger.warning(
+            "%s 不支援 %dx 槓桿，退為 %dx（該標的上限 %dx）",
+            symbol, self.leverage, eff, max_lev,
+        )
+        return eff
 
     async def execute_signal(self, signal: Signal, balance: float, candles_df=None) -> dict | None:
         if not signal.is_actionable:
@@ -95,11 +123,14 @@ class OrderExecutor:
             self.logger.info("%s 已有持倉，跳過", symbol)
             return None
 
+        # 用該標的「實際生效」的槓桿計算部位 —— 標的槓桿上限低於設定值時
+        # 已自動退階，沿用設定值會高估可開名目
+        eff_leverage = self._symbol_info.get(symbol, {}).get("leverage", self.leverage)
         size_ratio = 1.0 if signal.strength >= 70 else 0.5
         quantity = self.pm.capital_manager.calculate_position_size(
             balance=balance,
             price=signal.price,
-            leverage=self.leverage,
+            leverage=eff_leverage,
             size_ratio=size_ratio,
         )
         quantity = self._round_qty(symbol, quantity)
@@ -138,7 +169,7 @@ class OrderExecutor:
                 side=pos_side,
                 entry_price=entry_price,
                 quantity=filled_qty,
-                leverage=self.leverage,
+                leverage=eff_leverage,
                 atr=atr,
             )
 
@@ -187,7 +218,7 @@ class OrderExecutor:
                 "side": pos_side,
                 "entry_price": entry_price,
                 "quantity": filled_qty,
-                "leverage": self.leverage,
+                "leverage": eff_leverage,
                 "signal_strength": signal.strength,
                 "reasons": signal.reasons,
                 "order_id": order.get("orderId"),

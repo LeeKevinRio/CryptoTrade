@@ -305,6 +305,15 @@ class BinanceAPI:
             })
         return positions
 
+    async def get_max_leverage(self, symbol: str) -> int:
+        """查詢交易對允許的最大槓桿（新/小市值標的常低於主流幣）"""
+        data = await self.client.futures_leverage_bracket(symbol=symbol)
+        entry = data[0] if isinstance(data, list) and data else data or {}
+        brackets = entry.get("brackets", [])
+        if brackets:
+            return int(brackets[0].get("initialLeverage", 20))
+        return 20
+
     async def get_symbol_info(self, symbol: str) -> dict:
         info = await self.client.futures_exchange_info()
         for s in info["symbols"]:
