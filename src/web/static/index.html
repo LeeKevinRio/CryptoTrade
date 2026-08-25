@@ -187,7 +187,7 @@
           <select v-model="selectedSymbol" @change="onSymbolChange">
             <option v-for="s in status.symbols" :key="s" :value="s">{{ s }}</option>
           </select>
-          <select v-model="selectedTimeframe" @change="loadChart">
+          <select v-model="selectedTimeframe" @change="onTimeframeChange">
             <option v-for="t in status.timeframes" :key="t" :value="t">{{ t }}</option>
           </select>
           <button v-if="!activeBot?.paused" @click="pause" class="btn btn-warn btn-sm">暫停</button>
