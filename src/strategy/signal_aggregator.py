@@ -28,6 +28,7 @@ class SignalAggregator:
         self.medium_threshold = config.get("strategy", {}).get("medium_signal_threshold", 60)
         # 高時框趨勢過濾：下跌趨勢擋逆勢多單、上升趨勢擋逆勢空單
         self.trend_cfg = config.get("strategy", {}).get("trend_filter", {})
+        self._trend_tf_warned = False
 
     def _trend_bias(self, candles: dict[str, pd.DataFrame]) -> tuple[int, float]:
         """以高時框 EMA 斜率判定趨勢。回傳 (bias, slope_pct)：
@@ -39,7 +40,16 @@ class SignalAggregator:
         df = candles.get(tf)
         period = int(self.trend_cfg.get("ema_period", 50))
         lookback = int(self.trend_cfg.get("slope_lookback", 6))
-        if df is None or len(df) < period + lookback:
+        if df is None:
+            # 過濾器已啟用卻沒有該時框資料 → 靜默失效很危險，明確警告
+            if not self._trend_tf_warned:
+                logger.warning(
+                    "趨勢過濾已啟用但缺少 %s 資料（請把 %s 加入 trading.timeframes），"
+                    "過濾器不會生效", tf, tf,
+                )
+                self._trend_tf_warned = True
+            return 0, 0.0
+        if len(df) < period + lookback:
             return 0, 0.0
         ema = calculate_ema(df, period)
         prev = float(ema.iloc[-1 - lookback])

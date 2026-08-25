@@ -21,12 +21,13 @@ trading:
     - HEMIUSDT
     - PLUMEUSDT
     - CHIPUSDT
+  # 只訂閱策略真正會用到的時框 —— 每個 symbol×timeframe 都是一條持續推送的
+  # 幣安串流，訂閱無用時框純燒頻寬（1m 無人使用；4h 僅 trend_filter 需要，目前關閉）
+  # ⚠️ 若要啟用 strategy.trend_filter，需把 4h 加回本清單
   timeframes:
-    - 1m
     - 5m
     - 15m
     - 1h
-    - 4h
   use_testnet: true
 
 # 雙 bot 配置：spot（保守）與 futures（高風險）
