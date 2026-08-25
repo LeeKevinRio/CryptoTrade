@@ -117,6 +117,9 @@ def create_app(tracker=None) -> FastAPI:
         title="CryptoTrade Dashboard",
         docs_url=None, redoc_url=None, openapi_url=None,
     )
+    # JSON/JS/CSS 壓縮 —— 輪詢型儀表板的傳輸量可降約 80%
+    from fastapi.middleware.gzip import GZipMiddleware
+    app.add_middleware(GZipMiddleware, minimum_size=500)
     require_auth = _make_auth_dependency()
 
     # ── 公網模式整站閘門 ──────────────────────────
@@ -586,13 +589,30 @@ def create_app(tracker=None) -> FastAPI:
             await websocket.close(code=1008)
             return
         await websocket.accept()
+
+        # 前端一次只畫一組 symbol+interval 的 K 線，但行情有
+        # len(symbols) × len(timeframes) 條串流在跑（10×5=50）。
+        # 不過濾等於把 98% 的訊息推出去讓瀏覽器丟掉 —— 這是頻寬破表的主因。
+        want_symbol = websocket.query_params.get("symbol")
+        want_interval = websocket.query_params.get("interval")
+
+        def _wanted(event: dict) -> bool:
+            if not event["type"].startswith("kline"):
+                return True          # 訊號/開平倉等事件稀少且重要，一律送
+            if not want_symbol or not want_interval:
+                return False         # 未指定則不送即時 K 線（圖表改由 REST 補）
+            d = event.get("data", {})
+            return d.get("symbol") == want_symbol and d.get("interval") == want_interval
+
         queue = await bus.subscribe()
         try:
             for event in bus.recent(limit=20):
-                await websocket.send_text(json.dumps(event))
+                if _wanted(event):
+                    await websocket.send_text(json.dumps(event))
             while True:
                 event = await queue.get()
-                await websocket.send_text(json.dumps(event))
+                if _wanted(event):
+                    await websocket.send_text(json.dumps(event))
         except WebSocketDisconnect:
             pass
         except Exception as e:

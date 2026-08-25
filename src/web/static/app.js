@@ -273,7 +273,16 @@ createApp({
       } catch (e) { console.error('chart load failed', e); }
     };
 
-    const onSymbolChange = async () => { await loadChart(); await fetchIndicators(); };
+    // 切換 symbol/時框後重連 WS，讓伺服器改推新的那一組 K 線
+    const reconnectWs = () => {
+      if (ws) { try { ws.onclose = null; ws.close(); } catch (e) { /* ignore */ } }
+      connectWs();
+    };
+
+    const onSymbolChange = async () => {
+      await loadChart(); await fetchIndicators(); reconnectWs();
+    };
+    const onTimeframeChange = async () => { await loadChart(); reconnectWs(); };
 
     const setTab = async (tab) => {
       activeTab.value = tab;
@@ -336,7 +345,13 @@ createApp({
 
     const connectWs = () => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      // 帶上目前檢視的 symbol/interval：伺服器只推這一組 K 線。
+      // 不帶會收到全部 symbol×timeframe 的即時跳動（98% 用不到，純燒頻寬）
+      const q = new URLSearchParams({
+        symbol: selectedSymbol.value || '',
+        interval: selectedTimeframe.value || '',
+      });
+      ws = new WebSocket(`${proto}://${location.host}/ws?${q}`);
       ws.onopen = () => { wsConnected.value = true; };
       ws.onclose = () => {
         wsConnected.value = false;
@@ -387,16 +402,31 @@ createApp({
       await fetchPerformance();
       await fetchSentiment();
       connectWs();
-      setInterval(fetchStatus, 30000);
-      setInterval(fetchOverview, 15000);
-      setInterval(fetchPerformance, 30000);
-      setInterval(fetchSentiment, 60000);
-      setInterval(() => {
+      // 分頁在背景時不輪詢 —— 開著沒在看的分頁曾是頻寬的主要消耗來源，
+      // 回到前景立即補抓一次，使用者不會看到過期資料
+      const whenVisible = (fn) => () => { if (!document.hidden) fn(); };
+      setInterval(whenVisible(fetchStatus), 30000);
+      setInterval(whenVisible(fetchOverview), 30000);
+      setInterval(whenVisible(fetchPerformance), 60000);
+      setInterval(whenVisible(fetchSentiment), 120000);
+      setInterval(whenVisible(() => {
         if (activeTab.value !== 'overview') {
           fetchBotData();
           fetchIndicators();
         }
-      }, 8000);
+      }), 20000);
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          // 背景時關閉行情串流；回前景再連
+          if (ws) { try { ws.onclose = null; ws.close(); } catch (e) { /* ignore */ } }
+          wsConnected.value = false;
+          return;
+        }
+        connectWs();
+        fetchStatus(); fetchOverview();
+        if (activeTab.value !== 'overview') { fetchBotData(); fetchIndicators(); }
+      });
     });
 
     return {
@@ -409,7 +439,7 @@ createApp({
       indicatorRows, tradePctUsed,
       signalClass, rsiClass, bbClass, volClass, formatHold, clampBBPos,
       fmtDateTime, pnlClass,
-      loadChart, onSymbolChange, setTab,
+      loadChart, onSymbolChange, onTimeframeChange, setTab,
       closePosition, pause, resume, doForceTrade,
     };
   },
