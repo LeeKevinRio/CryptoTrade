@@ -192,6 +192,8 @@ def create_app(tracker=None) -> FastAPI:
     async def get_status():
         return {
             "testnet": state.testnet,
+            "trading_disabled": os.environ.get(
+                "TRADING_DISABLED", "false").lower() == "true",
             "symbols": state.symbols,
             "timeframes": state.timeframes,
             "bots": [

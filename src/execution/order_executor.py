@@ -1,6 +1,7 @@
 """下單執行器 — 支援現貨 / 合約雙模式"""
 
 import math
+import os
 
 from src.data.binance_client import BinanceAPI
 from src.risk.position_manager import PositionManager
@@ -32,6 +33,17 @@ class OrderExecutor:
         self.leverage = config.get("leverage", 5) if mode == "futures" else 1
         self.only_long = config.get("only_long", mode == "spot")
         self.logger = setup_logger(f"executor.{bot_id}")
+
+        # 觀察模式：顯示行情/持倉但保證不送出任何訂單。
+        # 供「本地開介面、雲端引擎交易」的並行場景 —— 兩台全功能引擎
+        # 對同一帳戶會重複下單互相打架
+        self.trading_disabled = os.environ.get(
+            "TRADING_DISABLED", "false",
+        ).lower() == "true"
+        if self.trading_disabled:
+            self.logger.warning(
+                "👁️ TRADING_DISABLED=true — 觀察模式：不會送出任何訂單",
+            )
 
         self._symbol_info: dict[str, dict] = {}
 
@@ -67,6 +79,10 @@ class OrderExecutor:
                 }
 
                 if self.mode == "futures":
+                    if self.trading_disabled:
+                        # 觀察模式不寫入帳戶設定，避免干擾正在交易的另一台引擎
+                        self._symbol_info[symbol]["leverage"] = self.leverage
+                        continue
                     # 先鎖定保證金模式再設槓桿：兩者的爆倉特性差異極大，
                     # 不可依賴帳戶預設值（詳見 set_margin_type doc）
                     await self.api.set_margin_type(
@@ -99,6 +115,8 @@ class OrderExecutor:
         return eff
 
     async def execute_signal(self, signal: Signal, balance: float, candles_df=None) -> dict | None:
+        if self.trading_disabled:
+            return None
         if not signal.is_actionable:
             return None
 
@@ -255,6 +273,9 @@ class OrderExecutor:
                 self.logger.warning("TP L%d 掛單失敗 %s: %s", i, symbol, e)
 
     async def close_position(self, symbol: str, quantity: float, reason: str) -> dict | None:
+        if self.trading_disabled:
+            self.logger.info("👁️ 觀察模式：略過平倉 %s（%s）", symbol, reason)
+            return None
         # per-symbol 鎖：防止 risk_loop 與 web close 同時觸發雙重平倉
         async with self.pm.lock_for(symbol):
             pos = self.pm.get_position(symbol)

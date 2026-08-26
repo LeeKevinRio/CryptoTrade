@@ -67,6 +67,31 @@ fly logs            # 看日誌
 
 瀏覽器開 `https://<app名稱>.fly.dev/?token=<你設定的WEB_AUTH_TOKEN>`。
 
+### 本地執行（雲端的備援與看盤）
+
+雲端卡住時本地要能接手，平時也能在本地看介面。首次準備：
+複製 `.env.example` 為 `.env` 填入金鑰，之後雙擊 / 執行：
+
+```
+run_local.bat          # Windows — 全功能模式（交易 + 介面）
+run_local.bat view     # Windows — 觀察模式（只看不下單）
+./run_local.sh         # macOS/Linux — 全功能模式
+./run_local.sh view    # macOS/Linux — 觀察模式
+```
+
+儀表板在 http://127.0.0.1:8899（本地預設免 token）。
+
+**⚠️ 黃金規則：同一時間只能有一台引擎在交易。**
+
+| 情境 | 本地用哪個模式 |
+|---|---|
+| 雲端正常運作 | `view`（觀察模式：完整看行情/持倉/績效，保證不下單、不動帳戶設定） |
+| 雲端掛掉 | 全功能模式接手；**雲端恢復前先關掉本地**，再讓雲端接回 |
+
+兩台全功能引擎同時跑會對同一個幣安帳戶重複開倉、互搶平倉。觀察模式由
+`TRADING_DISABLED=true` 環境變數實現，`/api/status` 的 `trading_disabled`
+欄位可確認當前模式。
+
 ### 頻寬（免費方案的真正瓶頸）
 
 Render Hobby workspace 每月含 **5 GB 流量**,超過整個 workspace 會被暫停。
