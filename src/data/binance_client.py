@@ -305,6 +305,46 @@ class BinanceAPI:
             })
         return positions
 
+    async def get_account_trades(self, symbol: str, start_ms: int,
+                                 end_ms: int | None = None) -> list[dict]:
+        """拉取帳戶在該合約的全部成交（fills），時間升冪。
+
+        Binance 此端點每次查詢視窗上限 7 天、每頁 1000 筆，
+        這裡自動切視窗與翻頁。
+        """
+        import time as _time
+        end_ms = end_ms or int(_time.time() * 1000)
+        window = 7 * 86_400_000 - 1
+        out: list[dict] = []
+        cursor = start_ms
+        while cursor < end_ms:
+            win_end = min(cursor + window, end_ms)
+            from_id = None
+            while True:
+                params = dict(symbol=symbol, limit=1000)
+                if from_id is None:
+                    params.update(startTime=cursor, endTime=win_end)
+                else:
+                    params.update(fromId=from_id)
+                page = await self.client.futures_account_trades(**params)
+                if not page:
+                    break
+                # fromId 翻頁不受 endTime 限制，需自行截斷
+                page = [t for t in page if int(t["time"]) <= win_end]
+                out.extend(page)
+                if len(page) < 1000:
+                    break
+                from_id = int(page[-1]["id"]) + 1
+            cursor = win_end + 1
+        # 去重（視窗邊界可能重疊）並排序
+        seen, uniq = set(), []
+        for t in sorted(out, key=lambda t: (int(t["time"]), int(t["id"]))):
+            if t["id"] in seen:
+                continue
+            seen.add(t["id"])
+            uniq.append(t)
+        return uniq
+
     async def get_max_leverage(self, symbol: str) -> int:
         """查詢交易對允許的最大槓桿（新/小市值標的常低於主流幣）"""
         data = await self.client.futures_leverage_bracket(symbol=symbol)

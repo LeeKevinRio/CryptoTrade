@@ -38,6 +38,8 @@ class TradeRecord(Base):
     strategy = Column(String, nullable=True)
     status = Column(String, default="OPEN")
     close_reason = Column(String, nullable=True)
+    # 交易所匯入去重鍵："{symbol}:{最後一筆成交 id}"；bot 自己記的交易為 NULL
+    exchange_ref = Column(String, nullable=True, index=True)
 
 
 class DailyStats(Base):
@@ -57,6 +59,7 @@ _NEW_TRADE_COLUMNS = [
     ("bot_id", "VARCHAR"),
     ("mode", "VARCHAR"),
     ("close_reason", "VARCHAR"),
+    ("exchange_ref", "VARCHAR"),
 ]
 _NEW_STATS_COLUMNS = [("bot_id", "VARCHAR")]
 

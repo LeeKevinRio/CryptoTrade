@@ -500,6 +500,7 @@ class TradeOrchestrator:
         logger.info("=" * 50)
 
         await self.api.connect()
+        await self._import_exchange_history()
         await self._load_historical_candles()
 
         # 寫共享行情狀態
@@ -559,6 +560,25 @@ class TradeOrchestrator:
         # 啟動失敗後的清理不發通知，避免退避重試循環對 Telegram 洗版
         if was_running:
             await self.notifier.send("🛑 *CryptoTrade 已停止*")
+
+    async def _import_exchange_history(self):
+        """啟動時從交易所回補成交紀錄 —— 資料庫歸零 / 本地雲端切換後績效不斷層"""
+        import os
+        try:
+            days = int(os.environ.get("IMPORT_EXCHANGE_TRADES_DAYS", "30"))
+        except ValueError:
+            days = 30
+        if days <= 0:
+            return
+        from src.execution.exchange_import import import_trades
+        try:
+            stats = await import_trades(
+                self.api, self.tracker.session_factory, list(self.symbols), days,
+            )
+            if stats["inserted"]:
+                logger.info("📥 已從交易所回補 %d 筆歷史交易（%d 天）", stats["inserted"], days)
+        except Exception as e:  # noqa: BLE001 — 回補失敗不應阻斷交易
+            logger.warning("交易所歷史回補失敗（不影響交易）: %s", e)
 
     async def _load_historical_candles(self):
         failed = []
