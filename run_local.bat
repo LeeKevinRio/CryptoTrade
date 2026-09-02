@@ -17,6 +17,18 @@ if not exist .env (
   pause & exit /b 1
 )
 
+REM 8899 埠是「重複啟動守門」：被占用 = 很可能已有一個 bot 在跑
+netstat -ano | findstr /R /C:":8899 .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  echo [錯誤] 8899 埠已被占用 — 很可能已有另一個 bot 在跑（舊視窗 / run_bot.bat / Docker）
+  echo 佔用者：
+  netstat -ano | findstr /R /C:":8899 .*LISTENING"
+  echo 查程式名稱：tasklist /FI "PID eq ^<最後一欄的PID^>"
+  echo 確定要換成這個新版就先關掉它：taskkill /PID ^<PID^> /F  （Docker 則 docker compose down）
+  echo 兩台引擎同時交易會對同一帳戶重複下單，請只留一台。
+  pause & exit /b 1
+)
+
 if not exist .venv (
   echo [首次執行] 建立虛擬環境...
   python -m venv .venv
