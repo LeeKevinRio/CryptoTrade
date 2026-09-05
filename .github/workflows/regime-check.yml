@@ -29,15 +29,15 @@ jobs:
           cache: pip
       - name: 安裝依賴
         run: pip install -r requirements.txt
-      - name: 下載近 7 天真實 K 線
-        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 7 --no-cache
+      - name: 下載近 30 天真實 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 30 --no-cache
       - name: 重放現行參數
         env:
           BINANCE_API_KEY: backtest-offline
           BINANCE_API_SECRET: backtest-offline
         run: |
           python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} \
-            --days 7 --rank expectancy --min-trades 1 --no-report \
+            --days 30 --rank expectancy --min-trades 1 --no-report \
             --dump-csv reports/regime-check-${{ matrix.symbol }}.csv
       - uses: actions/upload-artifact@v4
         with:
