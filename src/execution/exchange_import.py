@@ -171,6 +171,7 @@ async def import_trades(api, session_factory, symbols: list[str], days: int,
                     entry_time=tr["entry_time"], exit_time=tr["exit_time"],
                     strategy="exchange_import", status="CLOSED",
                     close_reason=IMPORT_REASON, exchange_ref=tr["exchange_ref"],
+                    commission=tr["commission"],
                 ))
                 stats["inserted"] += 1
             session.commit()

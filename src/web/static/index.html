@@ -94,8 +94,9 @@
           <div class="perf-metrics">
             <div class="perf-metric">
               <div class="pm-label">總損益</div>
-              <div class="pm-value" :class="pnlClass(perf.overall.total_pnl)">
-                {{ perf.overall.total_pnl >= 0 ? '+' : '' }}{{ perf.overall.total_pnl }} USDT
+              <div class="pm-value" :class="pnlClass(perf.overall.net_pnl ?? perf.overall.total_pnl)">
+                {{ (perf.overall.net_pnl ?? perf.overall.total_pnl) >= 0 ? '+' : '' }}{{ perf.overall.net_pnl ?? perf.overall.total_pnl }} USDT
+                <small style="opacity:.7;font-weight:normal">淨額（毛 {{ perf.overall.total_pnl >= 0 ? '+' : '' }}{{ perf.overall.total_pnl }}，費 -{{ perf.overall.total_commission ?? 0 }}）</small>
               </div>
             </div>
             <div class="perf-metric">
