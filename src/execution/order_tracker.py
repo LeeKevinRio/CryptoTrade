@@ -199,6 +199,10 @@ class OrderTracker:
                     "close_reason": r.close_reason,
                     "entry_time": r.entry_time.isoformat() if r.entry_time else "",
                     "exit_time": r.exit_time.isoformat() if r.exit_time else "",
+                    # 供扣費統計：有真實手續費用真實值，否則以名目估算
+                    "commission": r.commission,
+                    "entry_price": r.entry_price,
+                    "quantity": r.quantity,
                 }
                 for r in records
             ]

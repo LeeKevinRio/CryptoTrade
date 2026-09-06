@@ -6,9 +6,21 @@
 
 from collections import defaultdict
 
+# 來回吃單手續費估計（0.04% × 2），用於沒有真實手續費紀錄的交易
+EST_FEE_RATE = 0.0008
+
+
+def trade_commission(r: dict) -> float:
+    """真實手續費優先；無紀錄時以進場名目 × 0.08% 估算"""
+    c = r.get("commission")
+    if c is not None:
+        return float(c)
+    notional = float(r.get("entry_price") or 0) * float(r.get("quantity") or 0)
+    return notional * EST_FEE_RATE
+
 
 def compute_stats(rows: list[dict]) -> dict:
-    """從一組已平倉交易算核心績效指標"""
+    """從一組已平倉交易算核心績效指標（毛額 + 扣費淨額）"""
     pnls = [r.get("pnl") or 0.0 for r in rows]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
@@ -29,7 +41,20 @@ def compute_stats(rows: list[dict]) -> dict:
     profit_factor = (gross_profit / gross_loss) if gross_loss else (float("inf") if gross_profit else 0.0)
     expectancy = (total_pnl / n) if n else 0.0
 
+    # ── 扣費淨額：真金決策唯一該看的數字 ──
+    fees = [trade_commission(r) for r in rows]
+    total_commission = sum(fees)
+    net_pnls = [p - f for p, f in zip(pnls, fees)]
+    net_total = sum(net_pnls)
+    net_wins = sum(p for p in net_pnls if p > 0)
+    net_losses = abs(sum(p for p in net_pnls if p < 0))
+    net_pf = (net_wins / net_losses) if net_losses else (float("inf") if net_wins else 0.0)
+
     return {
+        "total_commission": round(total_commission, 2),
+        "net_pnl": round(net_total, 2),
+        "net_expectancy": round(net_total / n, 2) if n else 0.0,
+        "net_profit_factor": net_pf,
         "n": n,
         "wins": len(wins),
         "losses": len(losses),
@@ -95,8 +120,17 @@ def diagnose(s: dict) -> list[str]:
         out.append(f"獲利因子 {s['profit_factor']:.2f} < 1：每虧 1 元只賺回 {s['profit_factor']:.2f} 元，長期為負期望。")
     if s["expectancy"] < 0:
         out.append(f"期望值為負（{s['expectancy']:+.2f}/筆）：以目前策略，交易越多虧越多。")
+    # 扣費後才是真金決策的依據
+    if s.get("net_pnl") is not None and s["total_pnl"] >= 0 and s["net_pnl"] < 0:
+        out.append(
+            f"毛利 +{s['total_pnl']:.2f} 但扣手續費 {s['total_commission']:.2f} 後為 {s['net_pnl']:+.2f}："
+            f"手續費吃掉全部優勢，交易頻率過高或每筆利潤太薄。"
+        )
     if not out and s["n"] > 0:
-        out.append("目前指標健康（期望值為正且 PF>1）。")
+        if s.get("net_pnl", 0) > 0:
+            out.append(f"目前指標健康（扣費後期望值 {s['net_expectancy']:+.2f}/筆、淨 PF>1）。")
+        else:
+            out.append("毛額指標為正，但扣費後不為正，尚未證實有 edge。")
     return out
 
 
@@ -106,7 +140,7 @@ def full_breakdown(rows: list[dict]) -> dict:
     """
     def _safe(s):
         s = dict(s)
-        for k in ("payoff", "profit_factor"):
+        for k in ("payoff", "profit_factor", "net_profit_factor"):
             if s[k] == float("inf"):
                 s[k] = None
             elif isinstance(s[k], float):

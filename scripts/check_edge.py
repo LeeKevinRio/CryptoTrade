@@ -21,8 +21,9 @@ import numpy as np
 
 def fetch(db: str, days: int | None, bot: str | None):
     con = sqlite3.connect(db)
-    q = ("SELECT pnl_pct, close_reason, exit_time FROM trades "
-         "WHERE status='CLOSED' AND pnl_pct IS NOT NULL")
+    # commission/entry_price/quantity 供扣費：真金決策必須看淨額
+    q = ("SELECT pnl_pct, close_reason, exit_time, commission, entry_price, quantity "
+         "FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL")
     args: list = []
     if bot:
         q += " AND bot_id = ?"
@@ -69,8 +70,20 @@ def main():
         print(f"樣本太少（{len(rows)} 筆），無法檢定")
         return
 
-    p = np.array([r[0] for r in rows], dtype=float)
+    gross = np.array([r[0] for r in rows], dtype=float)
+
+    # 扣費：有真實手續費用真實值換算成名目 %，否則以來回 0.08% 估算
+    def fee_pct(r):
+        commission, entry, qty = r[3], r[4], r[5]
+        notional = (entry or 0) * (qty or 0)
+        if commission is not None and notional > 0:
+            return commission / notional * 100
+        return 0.08
+
+    fees = np.array([fee_pct(r) for r in rows], dtype=float)
+    p = gross - fees          # 以下所有檢定都用「扣費後」的 pnl_pct
     n = len(p)
+    print(f"  毛期望值     {gross.mean():+.4f}% / 筆   平均手續費 {fees.mean():.3f}% / 筆")
     wins, losses = p[p > 0], p[p <= 0]
     wr = len(wins) / n
     payoff = abs(wins.mean() / losses.mean()) if len(losses) and len(wins) else float("inf")
@@ -86,7 +99,7 @@ def main():
 
     scope = f"最近 {args.days} 天" if args.days else "全部"
     print("=" * 62)
-    print(f"  實盤 edge 檢定（{scope}，以 pnl_pct 衡量）")
+    print(f"  實盤 edge 檢定（{scope}，以「扣手續費後」的 pnl_pct 衡量）")
     print("=" * 62)
     print(f"  樣本數       {n} 筆")
     print(f"  勝率         {wr*100:.1f}%   （打平需 {be_wr*100:.1f}%，"

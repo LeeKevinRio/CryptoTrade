@@ -40,6 +40,8 @@ class TradeRecord(Base):
     close_reason = Column(String, nullable=True)
     # 交易所匯入去重鍵："{symbol}:{最後一筆成交 id}"；bot 自己記的交易為 NULL
     exchange_ref = Column(String, nullable=True, index=True)
+    # 實際手續費（USDT）：交易所匯入者填真實值；bot 自記者為 NULL → 統計時以名目 × 0.08% 估算
+    commission = Column(Float, nullable=True)
 
 
 class DailyStats(Base):
@@ -60,6 +62,7 @@ _NEW_TRADE_COLUMNS = [
     ("mode", "VARCHAR"),
     ("close_reason", "VARCHAR"),
     ("exchange_ref", "VARCHAR"),
+    ("commission", "FLOAT"),
 ]
 _NEW_STATS_COLUMNS = [("bot_id", "VARCHAR")]
 
