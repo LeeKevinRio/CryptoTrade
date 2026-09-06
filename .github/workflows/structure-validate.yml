@@ -1,26 +1,28 @@
-# 行情重放檢查 — 用最近 N 天真實 K 線重跑現行參數，
-# 對照實盤同期績效：回測也虧=行情因素；回測獲利=實作落差
-# 觸發：更新 backtest/.regime-check-trigger 並 push
+# 結構性驗證 — 出場全網格 × 趨勢過濾開/關 × 30/90 天雙窗口
+# 目的：找「兩個窗口都全標的淨EV為正」的組合，避免選出只適合單一行情的參數
+# 產出 reports/structval-{天數}d-{trend}-{symbol}.csv
+# 觸發：更新 backtest/.structval-trigger 並 push
 
-name: 行情重放檢查
+name: 結構性驗證
 
 on:
   push:
     paths:
-      - "backtest/.regime-check-trigger"
+      - "backtest/.structval-trigger"
 
 permissions:
   contents: write
 
 jobs:
-  replay:
+  sweep:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        symbol: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, DOGEUSDT,
-                 HEMIUSDT, PLUMEUSDT, XPLUSDT]
+        window: [30, 90]
+        trend: [off, on]
+        symbol: [BTCUSDT, ETHUSDT, BNBUSDT, ALLOUSDT, HEMIUSDT, PLUMEUSDT, CHIPUSDT]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,24 +31,25 @@ jobs:
           cache: pip
       - name: 安裝依賴
         run: pip install -r requirements.txt
-      - name: 下載近 30 天真實 K 線
-        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 30 --no-cache
-      - name: 重放現行參數
+      - name: 下載真實 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days ${{ matrix.window }} --no-cache
+      - name: 全網格掃描
         env:
           BINANCE_API_KEY: backtest-offline
           BINANCE_API_SECRET: backtest-offline
         run: |
           python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} \
-            --days 30 --rank expectancy --min-trades 1 --no-report \
-            --dump-csv reports/regime-check-${{ matrix.symbol }}.csv
+            --days ${{ matrix.window }} --rank expectancy --min-trades 8 \
+            --trend-filter ${{ matrix.trend }} --no-report \
+            --dump-csv reports/structval-${{ matrix.window }}d-${{ matrix.trend }}-${{ matrix.symbol }}.csv
       - uses: actions/upload-artifact@v4
         with:
-          name: regime-${{ matrix.symbol }}
-          path: reports/regime-check-${{ matrix.symbol }}.csv
+          name: structval-${{ matrix.window }}-${{ matrix.trend }}-${{ matrix.symbol }}
+          path: reports/structval-${{ matrix.window }}d-${{ matrix.trend }}-${{ matrix.symbol }}.csv
           if-no-files-found: error
 
   collect:
-    needs: replay
+    needs: sweep
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -66,5 +69,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add reports/
           git diff --cached --quiet && echo "沒有新報告" && exit 0
-          git commit -m "docs: 行情重放檢查報表（Actions 自動產出）"
+          git commit -m "docs: 結構性驗證報表（Actions 自動產出）"
           git push
