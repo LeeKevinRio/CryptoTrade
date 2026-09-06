@@ -22,12 +22,13 @@ trading:
     - PLUMEUSDT
     - CHIPUSDT
   # 只訂閱策略真正會用到的時框 —— 每個 symbol×timeframe 都是一條持續推送的
-  # 幣安串流，訂閱無用時框純燒頻寬（1m 無人使用；4h 僅 trend_filter 需要，目前關閉）
-  # ⚠️ 若要啟用 strategy.trend_filter，需把 4h 加回本清單
+  # 幣安串流，訂閱無用時框純燒頻寬（1m 無人使用，已移除）
+  # 4h 供 strategy.trend_filter 使用（2026-09-02 啟用）；若關閉過濾器可一併移除
   timeframes:
     - 5m
     - 15m
     - 1h
+    - 4h
   use_testnet: true
 
 # 雙 bot 配置：spot（保守）與 futures（高風險）
@@ -117,12 +118,15 @@ bots:
       sentiment_threshold: 0.2        # |bias| >= 此值才把消息面計入評分
       external_threshold: 0.2         # |bias| >= 此值才把外部訊號計入評分
       # 高時框趨勢閘門：4h EMA 斜率向下擋多單、向上擋空單（只擋不加分）
-      # 2026-08-16 A/B 結論（90天、現行出場參數、扣費後）：維持關閉。
-      #   BTC +0.7% ETH +5.9% BNB +1.8% 改善，但 SOL 淨EV 轉負（-16.0%），
-      #   合計淨盈虧 +18.2% → +10.7%，不符「4/4 皆改善才開」的預定標準。
-      #   工具鏈保留（trend-ab workflow），市場結構改變時可重測。
+      # 2026-08-16 A/B：關閉（SOL 轉負，4/4 標準未過）。
+      # 2026-09-02 結構性驗證（出場全網格 × 趨勢開/關 × 30/90 天 × 七標的，扣費後）：
+      #   關閉 → 1920 組出場參數中「兩窗口七標的全正」= 0 組，現行參數 12/14
+      #   開啟 → 16 組全正，現行出場參數 14/14（最差格 +0.020%/筆）
+      #   30 天窗口改善最顯著：BTC +0.001→+0.576、BNB -0.099→+0.114、PLUME -0.099→+0.020
+      # 結論：出場參數不是病灶，缺的是行情環境閘門 → 啟用（移除 SOL 後 4/4 障礙消失）。
+      # 需要 trading.timeframes 含 4h。詳 reports/structure-review-2026-09-02.md
       trend_filter:
-        enabled: false
+        enabled: true
         timeframe: "4h"
         ema_period: 50
         slope_lookback: 6             # 斜率取 6 根 4h（一天）
