@@ -32,9 +32,9 @@ jobs:
       matrix:
         # 現役交易對 —— 每週一重掃覆核「扣費後淨EV>0」，轉負者應自清單移除
         # （候選標的檢定改由 top10-validate workflow 依成交量排名動態進行）
-        # 2026-09-02 移除 SOL/XPL/DOGE（30 天重放淨EV 為負）；候選仍每週重掃供納回判斷
-        symbol: [BTCUSDT, ETHUSDT, BNBUSDT, ALLOUSDT, HEMIUSDT, PLUMEUSDT, CHIPUSDT,
-                 SOLUSDT, XPLUSDT, DOGEUSDT]
+        # 現役七標的（主流幣）+ 候選觀察名單（邊際/已退場者，供每週覆核是否納回）
+        symbol: [BTCUSDT, ETHUSDT, BNBUSDT, SUIUSDT, LINKUSDT, TAOUSDT, DOGEUSDT,
+                 SOLUSDT, ZECUSDT, XRPUSDT, ALLOUSDT, HEMIUSDT, PLUMEUSDT, CHIPUSDT]
     steps:
       - uses: actions/checkout@v4
 
