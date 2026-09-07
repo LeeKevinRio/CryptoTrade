@@ -10,17 +10,20 @@ trading:
   #   XPL +0.126  ALLO +0.156  HEMI +0.130  PLUME +0.249  CHIP +0.056（淨EV %/筆）
   #   排除 UUSDT -0.073。⚠️ 新上市幣的優勢量測自上市初期行情，
   #   每週一自動重掃會持續覆核，轉負即應移除
-  # 2026-09-02 移除 SOL / XPL / DOGE：30 天重放淨EV -0.62% / -0.31% / -0.32%，
-  #   連各自最佳參數都救不回（SOL 實盤同期亦為最大虧損源）。行情轉換後可由
-  #   每週重掃重新檢定納回。
+  # 2026-09-03 改採「成交量 TOP10 內的主流幣」（使用者要求以大幣為主）。
+  # 全數通過同一檢定：90 天真實 K 線、趨勢過濾啟用、扣費 0.08%/筆後淨EV > 0 且 ≥30 筆
+  #   TAO +0.263  BTC +0.284  ETH +0.226  BNB +0.164  SUI +0.132  LINK +0.078  DOGE +0.055
+  # 排除：XRP -0.076（唯一為負）；ZEC +0.012、SOL +0.026 邊際過低，列候選觀察
+  # 退場的新幣 ALLO/HEMI/PLUME/CHIP 檢定亦為正（+0.11~+0.23），但流動性與存續風險高，
+  #   依使用者偏好移出；仍留在每週重掃名單供比較
   symbols:
     - BTCUSDT
     - ETHUSDT
     - BNBUSDT
-    - ALLOUSDT
-    - HEMIUSDT
-    - PLUMEUSDT
-    - CHIPUSDT
+    - SUIUSDT
+    - LINKUSDT
+    - TAOUSDT
+    - DOGEUSDT
   # 只訂閱策略真正會用到的時框 —— 每個 symbol×timeframe 都是一條持續推送的
   # 幣安串流，訂閱無用時框純燒頻寬（1m 無人使用，已移除）
   # 4h 供 strategy.trend_filter 使用（2026-09-02 啟用）；若關閉過濾器可一併移除
