@@ -103,7 +103,8 @@ class PositionManager:
         if not full_close:
             pos.quantity -= close_qty
             pos.realized_pnl += leg_pnl
-            self.capital_manager.record_trade(leg_pnl)
+            # 部分平倉不是獨立的一筆交易 —— 只累計當日損益
+            self.capital_manager.record_partial(leg_pnl)
             result = {
                 "symbol": symbol,
                 "side": pos.side,
@@ -129,7 +130,9 @@ class PositionManager:
         self.tp_manager.remove_position(symbol)
         self.sl_manager.remove_stop(symbol)
         self.capital_manager.remove_position()
-        self.capital_manager.record_trade(leg_pnl)
+        # leg_pnl 計入當日損益（分段部分已於 record_partial 累計）；
+        # 連敗判定用整筆總損益，避免「分段小賺、整筆實虧」被誤判為勝
+        self.capital_manager.record_trade(leg_pnl, trade_result=total_pnl)
 
         result = {
             "symbol": symbol,

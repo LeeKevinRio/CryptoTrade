@@ -8,6 +8,7 @@ from src.risk.position_manager import PositionManager
 from src.strategy.base_strategy import Signal, SignalType
 from src.indicators.atr import get_current_atr
 from src.utils.logger import setup_logger
+from src.web.state import note_gate
 
 
 class OrderExecutor:
@@ -116,6 +117,7 @@ class OrderExecutor:
 
     async def execute_signal(self, signal: Signal, balance: float, candles_df=None) -> dict | None:
         if self.trading_disabled:
+            note_gate(signal.symbol, "觀察模式（TRADING_DISABLED=true）")
             return None
         if not signal.is_actionable:
             return None
@@ -135,10 +137,12 @@ class OrderExecutor:
         can_trade, reason = self.pm.capital_manager.can_trade(balance)
         if not can_trade:
             self.logger.warning("風控阻止交易: %s", reason)
+            note_gate(symbol, f"風控：{reason}")
             return None
 
         if self.pm.has_position(symbol):
             self.logger.info("%s 已有持倉，跳過", symbol)
+            note_gate(symbol, "該標的已有持倉")
             return None
 
         # 用該標的「實際生效」的槓桿計算部位 —— 標的槓桿上限低於設定值時
@@ -154,6 +158,7 @@ class OrderExecutor:
         quantity = self._round_qty(symbol, quantity)
         if quantity <= 0:
             self.logger.warning("%s 計算倉位為 0，跳過", symbol)
+            note_gate(symbol, "計算倉位為 0（餘額或單筆比例過小）")
             return None
 
         atr = get_current_atr(candles_df) if candles_df is not None else None

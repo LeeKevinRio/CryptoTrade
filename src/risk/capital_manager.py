@@ -124,19 +124,40 @@ class CapitalManager:
 
         return orders
 
-    def record_trade(self, pnl: float):
+    def record_partial(self, pnl: float):
+        """部分平倉（階梯停利分批成交）只計入當日損益。
+
+        一筆倉位可能分 3 階成交再全平；若每段都當成一筆交易，
+        max_daily_trades 會被 4 倍速消耗、連敗計數也被分段結果污染，
+        導致「每天開不到幾筆就撞上限而停止交易」。
+        """
+        self.reset_daily()
+        self._daily_pnl += pnl
+        logger.info(
+            "部分平倉: pnl=%.2f | 今日 pnl=%.2f（不計交易筆數）",
+            pnl, self._daily_pnl,
+        )
+
+    def record_trade(self, pnl: float, trade_result: float | None = None):
+        """記錄一筆完整交易。
+
+        Args:
+            pnl: 計入當日損益的金額（部分平倉已先行計入時，只傳最後一段）
+            trade_result: 整筆交易的總損益，用於連敗判定；None 則以 pnl 為準
+        """
         # 先檢查跨日，確保平倉 PnL 歸屬到正確的日期
         self.reset_daily()
         self._daily_trades += 1
         self._daily_pnl += pnl
-        # 連敗計數：虧損累加、獲利歸零；平盤（pnl == 0）不影響連敗串
-        if pnl < 0:
+        result = pnl if trade_result is None else trade_result
+        # 連敗計數：以整筆交易的總損益判定，虧損累加、獲利歸零；平盤不影響連敗串
+        if result < 0:
             self._consecutive_losses += 1
-        elif pnl > 0:
+        elif result > 0:
             self._consecutive_losses = 0
         logger.info(
-            "記錄交易: pnl=%.2f | 今日累計: %d 筆, pnl=%.2f, 連敗 %d",
-            pnl, self._daily_trades, self._daily_pnl, self._consecutive_losses,
+            "記錄交易: pnl=%.2f 總損益=%.2f | 今日累計: %d 筆, pnl=%.2f, 連敗 %d",
+            pnl, result, self._daily_trades, self._daily_pnl, self._consecutive_losses,
         )
 
     def add_position(self):

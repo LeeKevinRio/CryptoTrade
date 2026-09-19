@@ -19,7 +19,7 @@ from src.utils.models import init_db
 from src.utils.logger import setup_logger
 from src.web.app import create_app, serve as serve_web
 from src.web.event_bus import bus
-from src.web.state import state, BotState
+from src.web.state import state, BotState, note_gate
 
 logger = setup_logger("main")
 
@@ -234,6 +234,17 @@ class TradeBot:
         bot_state.last_signals[symbol] = signal_payload
         await bus.publish(f"signal.{self.bot_id}", signal_payload)
 
+        # 記錄這次評估的結果，供 /api/diag 回答「為什麼沒有交易」
+        if not signal.is_actionable:
+            reason = signal.reasons[0] if signal.reasons else "訊號強度不足"
+            if "趨勢過濾" in reason:
+                reason = "趨勢過濾擋下逆勢訊號"
+            else:
+                reason = f"訊號未達門檻（強度 {signal.strength:.0f}）"
+            note_gate(symbol, reason, evaluated=True)
+        else:
+            note_gate(symbol, None, evaluated=True, actionable=True)
+
         if signal.is_actionable:
             self.logger.info(
                 "📍 [%s] %s %s 強度=%.1f",
@@ -241,6 +252,7 @@ class TradeBot:
             )
             if bot_state.paused:
                 self.logger.info("[%s] 已暫停進場", self.bot_id)
+                note_gate(signal.symbol, "bot 已暫停（儀表板 pause）")
                 return
             await self._handle_signal(signal)
 
@@ -254,6 +266,7 @@ class TradeBot:
                 signal=signal, balance=balance, candles_df=main_df,
             )
             if result:
+                note_gate(signal.symbol, None, opened=True)
                 trade_id = self.tracker.record_open(result)
                 # 把 trade_id 寫回 Position 供平倉精確對應
                 pos = self.position_manager.get_position(result["symbol"])

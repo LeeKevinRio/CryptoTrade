@@ -165,11 +165,30 @@ def create_app(tracker=None) -> FastAPI:
         """自我診斷 — 引擎狀態 + 現場探測交易所連線/K線/餘額。
         引擎連不上交易所時，使用者無需翻主機日誌即可取得確切錯誤。
         """
+        gate = dict(state.trade_gate)
+        gate["blocked"] = dict(sorted(
+            gate.get("blocked", {}).items(), key=lambda kv: kv[1], reverse=True))
+        bots_risk = {}
+        for bid, b in state.bots.items():
+            if not b.bot_ref:
+                continue
+            cm = b.bot_ref.position_manager.capital_manager
+            bots_risk[bid] = {
+                "daily_trades": f"{cm.daily_trades}/{cm.max_daily_trades}",
+                "open_positions": f"{cm.open_positions}/{cm.max_concurrent}",
+                "consecutive_losses": f"{cm.consecutive_losses}/{cm.max_consecutive_losses}",
+                "daily_pnl": round(cm.daily_pnl, 2),
+                "can_trade": cm.can_trade(b.balance or 0)[1],
+                "paused": b.paused,
+            }
         out = {
             "engine": state.engine_status or {"phase": "unknown", "error": None},
             "testnet": state.testnet,
             "symbols": state.symbols,
             "bots": list(state.bots.keys()),
+            # 「為什麼沒有交易」：評估次數、可進場次數、實際開倉數與各阻擋原因
+            "trade_gate": gate,
+            "risk_state": bots_risk,
             "probes": {},
         }
         api = state.api_ref

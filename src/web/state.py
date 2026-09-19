@@ -37,6 +37,30 @@ class GlobalState:
     engine_status: dict[str, Any] = field(default_factory=dict)
     # 引擎的 BinanceAPI 參照，供 /api/diag 現場探測
     api_ref: Any = None
+    # 進場閘門統計 —— 回答「為什麼最近都沒有交易」：
+    # {"evaluated": n, "opened": n, "blocked": {原因: 次數}, "last": {...}}
+    trade_gate: dict[str, Any] = field(default_factory=lambda: {
+        "evaluated": 0, "actionable": 0, "opened": 0, "blocked": {}, "last": None,
+    })
+
+
+def note_gate(symbol: str, reason: str | None, *, evaluated: bool = False,
+              actionable: bool = False, opened: bool = False):
+    """記錄一次進場決策。reason 為 None 表示通過（實際開倉）。"""
+    from datetime import datetime, timezone
+    g = state.trade_gate
+    if evaluated:
+        g["evaluated"] += 1
+    if actionable:
+        g["actionable"] += 1
+    if opened:
+        g["opened"] += 1
+    if reason:
+        g["blocked"][reason] = g["blocked"].get(reason, 0) + 1
+        g["last"] = {
+            "symbol": symbol, "reason": reason,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
 
 
 state = GlobalState()
