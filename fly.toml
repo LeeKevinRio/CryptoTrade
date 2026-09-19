@@ -1,13 +1,8 @@
-# Fly.io 部署設定 — 替代方案（約 $2-3/月，24/7 不休眠 + 持久磁碟）
+# Fly.io 部署設定 — 24/7 常駐 + 持久磁碟（交易紀錄不隨部署歸零）
 # 網址形式：https://<app 名稱>.fly.dev
-#
-# 使用方式（詳見 DEPLOY.md「零、最快拿到公開網址」）：
-#   fly launch --no-deploy          # 首次：建立 app（沿用本檔設定）
-#   fly volumes create cryptotrade_data --region sin --size 1
-#   fly secrets set BINANCE_API_KEY=xxx BINANCE_API_SECRET=xxx \
-#       WEB_AUTH_TOKEN=$(openssl rand -hex 24) WEBHOOK_TOKEN=$(openssl rand -hex 24)
-#   fly deploy
+# 完整步驟見 DEPLOY.md「零、部署到 Fly.io」
 
+# app 名稱在 Fly 全域唯一，被占用時用 fly launch --name <你的名稱> 覆寫
 app = "cryptotrade"
 primary_region = "sin"      # 新加坡，靠近幣安
 
@@ -17,27 +12,35 @@ primary_region = "sin"      # 新加坡，靠近幣安
 [env]
   WEB_HOST = "0.0.0.0"
   WEB_PORT = "8899"
-  DASHBOARD_AUTH = "true"   # 公網必開：整站都要 token
-  BINANCE_TESTNET = "true"
+  DASHBOARD_AUTH = "true"          # 公網必開：整站（含 WebSocket）都要 token
+  BINANCE_TESTNET = "true"         # 上真金才改 false
+  TRADING_DISABLED = "false"       # true = 觀察模式，只看不下單
+  IMPORT_EXCHANGE_TRADES_DAYS = "30"  # 啟動時從幣安回補 30 天成交，績效不斷層
   DATABASE_URL = "sqlite+aiosqlite:////app/data/cryptotrade.db"
   TZ = "Asia/Taipei"
+
+# ⚠️ 交易 bot 必須「同一時間只有一台機器在跑」——
+# 預設的 rolling 部署會讓新舊機器短暫並存，等於兩台引擎對同一個幣安帳戶重複下單。
+# immediate：先停舊機再起新機（部署期間短暫離線，但絕不重複交易）。
+[deploy]
+  strategy = "immediate"
 
 [http_service]
   internal_port = 8899
   force_https = true
-  # 交易 bot 必須常駐 —— 關閉自動休眠
+  # 交易 bot 必須常駐 —— 關閉自動休眠，且固定單機
   auto_stop_machines = "off"
-  auto_start_machines = true
+  auto_start_machines = false
   min_machines_running = 1
 
   [[http_service.checks]]
     interval = "60s"
     timeout = "10s"
-    grace_period = "90s"
+    grace_period = "120s"          # 啟動要載入 7 標的 K 線 + 回補成交紀錄
     method = "GET"
-    path = "/healthz"
+    path = "/healthz"              # 無認證端點，不受 DASHBOARD_AUTH 影響
 
-# SQLite 交易紀錄放持久磁碟，重新部署不遺失
+# SQLite 交易紀錄放持久磁碟，重新部署不遺失（Render 免費方案最大的痛點）
 [mounts]
   source = "cryptotrade_data"
   destination = "/app/data"
@@ -45,3 +48,5 @@ primary_region = "sin"      # 新加坡，靠近幣安
 [[vm]]
   size = "shared-cpu-1x"
   memory = "512mb"
+  # pandas 指標運算與啟動回補的尖峰記憶體保險，避免 OOM 重啟
+  swap_size_mb = 512
