@@ -7,80 +7,65 @@
 
 ---
 
-## 零、部署到 Fly.io（主要方案）
+## 零、最快拿到公開網址（免 VPS、免買網域）
 
-平台直接給一個 HTTPS 網址（`https://<app名稱>.fly.dev`），手機與任何電腦都能開。
-選 Fly 而非 Render 的理由（皆為實際踩過的坑）：
+部署到 PaaS 平台，平台直接送你一個 HTTPS 網址（如 `https://cryptotrade.onrender.com`），
+手機、任何電腦都能開。repo 已放好兩份現成設定檔：
 
-| | Render 免費方案 | Fly.io |
-|---|---|---|
-| 休眠 | 閒置 15 分鐘休眠，交易迴圈跟著停 | 常駐不休眠 |
-| 交易紀錄 | 無持久磁碟，每次部署歸零 | **持久磁碟,跨部署保留** |
-| 流量 | 每月 5 GB，超過整個 workspace 被暫停 | 額度寬裕得多 |
-| 費用 | 免費起（但上述限制使其不適合實跑） | 約 $3/月起（以實際用量計費） |
+| 方案 | 設定檔 | 費用 | 適合 |
+|------|--------|------|------|
+| **Render**（推薦入門） | `render.yaml` | 免費起 | 快速測試儀表板 |
+| **Fly.io** | `fly.toml` | 約 $2-3/月 | 24/7 常駐 + 保留交易紀錄 |
 
-`fly.toml` 已設定好：新加坡節點（靠近幣安）、常駐單機、持久磁碟、無認證健康檢查。
+### 方案 A：Render（點幾下就完成）
 
-### 步驟（Windows PowerShell，約 15 分鐘）
+1. 用 GitHub 帳號登入 [dashboard.render.com](https://dashboard.render.com)
+2. **New → Blueprint** → 選擇本 repo（首次需授權 Render 讀取）
+3. Render 會讀取 `render.yaml` 自動帶出所有設定，此時填入兩個欄位：
+   - `BINANCE_API_KEY`、`BINANCE_API_SECRET`：填 **testnet 金鑰**
+     （在 [testnet.binancefuture.com](https://testnet.binancefuture.com) 免費申請，與正式金鑰無關）
+4. 按 **Apply**，等 3-5 分鐘建置完成
+5. 到服務頁面 → **Environment** → 複製自動產生的 `WEB_AUTH_TOKEN`
+6. 瀏覽器打開：
 
-```powershell
-# 1) 安裝 CLI 並登入（首次需綁信用卡）
-iwr https://fly.io/install.ps1 -useb | iex
-fly auth signup      # 已有帳號則 fly auth login
+   ```
+   https://<你的服務名>.onrender.com/?token=<WEB_AUTH_TOKEN>
+   ```
 
-# 2) 取得最新程式碼
-cd C:\Users\iu\AIProject\CryptoTrade
-git pull
+   通過一次後會種 cookie，同一瀏覽器之後直接開網址即可。
 
-# 3) 建立 app（沿用 fly.toml；名稱全域唯一，被占用就換一個，網址跟著變）
-fly launch --no-deploy --copy-config --name cryptotrade-你的後綴
+之後每次 `git push`，Render 會自動重新部署 —— 改完策略推上去就能在網址上看結果。
 
-# 4) 建立持久磁碟（交易紀錄從此不歸零）
+**免費方案的兩個限制（測試夠用，跑真交易不行）：**
+- 閒置 15 分鐘會休眠，交易迴圈跟著停，有人開網址才醒來
+- 沒有持久磁碟，重新部署後 SQLite 交易紀錄歸零
+
+要 24/7 不中斷：把 `render.yaml` 的 `plan: free` 改成 `plan: starter`（$7/月），
+並取消 `disk:` 區塊的註解讓交易紀錄跨部署保留。
+
+### 方案 B：Fly.io（24/7 常駐 + 持久磁碟）
+
+```bash
+# 安裝 CLI 並登入
+curl -L https://fly.io/install.sh | sh
+fly auth login
+
+# 在 repo 目錄執行（沿用 fly.toml；app 名稱被占用時換一個，網址跟著變）
+fly launch --no-deploy
 fly volumes create cryptotrade_data --region sin --size 1
-
-# 5) 產生 token 並填入密鑰（金鑰只存在 Fly，不進版控）
-$tok  = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})
-$hook = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})
-Write-Host "WEB_AUTH_TOKEN = $tok"     # 複製保存，開儀表板要用
-fly secrets set BINANCE_API_KEY=你的testnet金鑰 BINANCE_API_SECRET=你的testnet秘鑰 `
-  WEB_AUTH_TOKEN=$tok WEBHOOK_TOKEN=$hook
-
-# 6) 部署
+fly secrets set \
+  BINANCE_API_KEY=你的testnet金鑰 \
+  BINANCE_API_SECRET=你的testnet秘鑰 \
+  WEB_AUTH_TOKEN=$(openssl rand -hex 24) \
+  WEBHOOK_TOKEN=$(openssl rand -hex 24)
 fly deploy
+
+# 完成後
+fly status          # 看網址：https://<app名稱>.fly.dev
+fly logs            # 看日誌
 ```
 
-### 驗證
-
-```powershell
-fly status                 # 應顯示 1 台 machine、狀態 started
-fly logs                   # 應看到「Orchestrator 已啟動」
-```
-
-瀏覽器開（第一次要帶 token，之後種 cookie 免帶）：
-
-```
-https://<app名稱>.fly.dev/?token=<剛才的 WEB_AUTH_TOKEN>
-https://<app名稱>.fly.dev/api/diag?token=<同上>     # 引擎狀態 + 交易所連線探測
-```
-
-### 日常維運
-
-```powershell
-fly deploy                 # 改完程式碼後重新部署
-fly logs                   # 即時日誌
-fly ssh console            # 進容器，可跑 python -m scripts.check_edge
-fly scale count 1          # 確認只有一台機器（重要，見下）
-```
-
-> ⚠️ **同一時間只能有一台引擎在交易。** `fly.toml` 已設 `strategy = "immediate"`
-> （先停舊機再起新機）與 `auto_start_machines = false`，避免部署期間兩台機器並存
-> 對同一個幣安帳戶重複下單。**不要** `fly scale count 2`。
-> 同理：Fly 上線後，本地那台請關掉或改用 `run_local.bat view` 觀察模式。
-
-### 舊的 Render 部署
-
-`render.yaml` 仍保留可用（Blueprint 一鍵部署）。若要停用舊服務，到 Render
-Dashboard 將該 service 刪除或 suspend，避免與 Fly 同時交易。
+瀏覽器開 `https://<app名稱>.fly.dev/?token=<你設定的WEB_AUTH_TOKEN>`。
 
 ### 真金可用的風險配置（2026-09-03 起測試網也用這套跑）
 
