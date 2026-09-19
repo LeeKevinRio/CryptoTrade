@@ -176,3 +176,63 @@ class TestExecutorMakerTP(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDailyTradeCounting(unittest.TestCase):
+    """部分平倉不得消耗每日交易次數／污染連敗計數
+
+    maker 停利階梯一筆倉位會產生 3 次部分成交 + 1 次全平；若每段都計為一筆，
+    max_daily_trades=20 只需 5 個真實部位就會耗盡，當天不再開倉。
+    """
+
+    def _pm(self):
+        pm = PositionManager(copy.deepcopy(BASE_CONFIG))
+        pm.capital_manager.max_daily_trades = 20
+        pm.capital_manager.max_consecutive_losses = 3
+        return pm
+
+    def test_partial_closes_do_not_count_as_trades(self):
+        pm = self._pm()
+        cm = pm.capital_manager
+        pm.open_position("BTCUSDT", "LONG", 50000, 1.0, leverage=5)
+        pm.close_position("BTCUSDT", 50750, quantity=0.4)   # TP1
+        pm.close_position("BTCUSDT", 51250, quantity=0.35)  # TP2
+        self.assertEqual(cm.daily_trades, 0)                # 尚未完成一筆交易
+        pm.close_position("BTCUSDT", 51500)                 # 全平
+        self.assertEqual(cm.daily_trades, 1)                # 整段只算一筆
+
+    def test_daily_pnl_still_accumulates_every_leg(self):
+        pm = self._pm()
+        cm = pm.capital_manager
+        pm.open_position("BTCUSDT", "LONG", 100, 1.0, leverage=5)
+        pm.close_position("BTCUSDT", 110, quantity=0.5)     # +5
+        pm.close_position("BTCUSDT", 120)                   # +10
+        self.assertAlmostEqual(cm.daily_pnl, 15.0)
+
+    def test_consecutive_losses_use_total_not_leg(self):
+        # 分段小賺、整筆實虧 → 應計為一次連敗
+        pm = self._pm()
+        cm = pm.capital_manager
+        pm.open_position("BTCUSDT", "LONG", 100, 1.0, leverage=5)
+        pm.close_position("BTCUSDT", 110, quantity=0.2)     # 分段 +2
+        pm.close_position("BTCUSDT", 80)                    # 剩 0.8 × -20 = -16，總計 -14
+        self.assertEqual(cm.consecutive_losses, 1)
+
+    def test_full_close_profit_resets_streak(self):
+        pm = self._pm()
+        cm = pm.capital_manager
+        cm._consecutive_losses = 2
+        pm.open_position("BTCUSDT", "LONG", 100, 1.0, leverage=5)
+        pm.close_position("BTCUSDT", 110)
+        self.assertEqual(cm.consecutive_losses, 0)
+
+    def test_twenty_real_trades_before_daily_cap(self):
+        pm = self._pm()
+        cm = pm.capital_manager
+        for i in range(20):
+            pm.open_position("BTCUSDT", "LONG", 100, 1.0, leverage=5)
+            pm.close_position("BTCUSDT", 101, quantity=0.4)   # 階梯分段
+            pm.close_position("BTCUSDT", 102, quantity=0.35)
+            pm.close_position("BTCUSDT", 103)                 # 全平
+            self.assertEqual(cm.daily_trades, i + 1)
+        self.assertFalse(cm.can_trade(10000)[0])              # 第 21 筆才擋
