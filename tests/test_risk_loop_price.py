@@ -129,3 +129,39 @@ class TestNeutralSignalKeepsStrength(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdoptionRecordsOpenTrade(unittest.TestCase):
+    """接管沒有 DB 紀錄的倉位時要先補 OPEN，平倉才寫得進績效"""
+
+    def test_adopted_position_close_appears_in_performance(self):
+        from src.main import TradeBot
+        from src.execution.order_tracker import OrderTracker
+        from src.utils.models import init_db
+
+        tracker = OrderTracker(init_db("sqlite:///:memory:"))
+        api = MagicMock()
+        api.get_open_positions = AsyncMock(return_value=[{
+            "symbol": "DOGEUSDT", "side": "SHORT", "quantity": 16609.0,
+            "entry_price": 0.0874, "leverage": 5,
+        }])
+        api.get_open_orders = AsyncMock(return_value=[])
+        api.futures_stop_market = AsyncMock(return_value={})
+        api.futures_limit_order = AsyncMock(return_value={})
+        bot_cfg = {"mode": "futures", "leverage": 5, "risk": BASE_CONFIG["risk"], "strategy": {}}
+        bot = TradeBot("futures", bot_cfg, api, CandleManager(), ["DOGEUSDT"],
+                       ["5m"], notifier=MagicMock(), tracker=tracker)
+        asyncio.run(bot._sync_existing_positions())
+
+        pos = bot.position_manager.get_position("DOGEUSDT")
+        self.assertIsNotNone(pos.trade_id)
+        self.assertEqual(len(tracker.get_open_trades("futures")), 1)
+
+        # 模擬軟體停損平倉並記錄
+        result = bot.position_manager.close_position("DOGEUSDT", 0.0955)
+        tracker.record_close(trade_id=result["trade_id"], symbol="DOGEUSDT",
+                             exit_price=0.0955, pnl=result["pnl"], pnl_pct=result["pnl_pct"],
+                             bot_id="futures", reason="停損")
+        perf = tracker.get_performance(days=7)
+        self.assertEqual(perf["overall"]["n"], 1)
+        self.assertLess(perf["overall"]["total_pnl"], 0)
