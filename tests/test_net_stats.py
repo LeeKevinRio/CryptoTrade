@@ -66,3 +66,43 @@ class TestImportStoresCommission(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPeriodFilter(unittest.TestCase):
+    """期間篩選須以平倉時間界定（損益在平倉當下實現）"""
+
+    def setUp(self):
+        from src.execution.order_tracker import OrderTracker
+        self.sf = init_db("sqlite:///:memory:")
+        self.tracker = OrderTracker(self.sf)
+
+    def _add(self, entry_days_ago, exit_days_ago, pnl=10.0):
+        import datetime as dt
+        now = dt.datetime.utcnow()
+        with self.sf() as s:
+            s.add(TradeRecord(
+                bot_id="futures", mode="futures", symbol="BTCUSDT", side="LONG",
+                entry_price=100, exit_price=110, quantity=1.0, pnl=pnl, pnl_pct=10,
+                entry_time=now - dt.timedelta(days=entry_days_ago),
+                exit_time=now - dt.timedelta(days=exit_days_ago),
+                status="CLOSED", close_reason="測試",
+            ))
+            s.commit()
+
+    def test_long_held_trade_counts_in_recent_period(self):
+        # 45 天前開倉、3 天前才平倉 → 近 30 天應該看得到
+        self._add(entry_days_ago=45, exit_days_ago=3)
+        self.assertEqual(self.tracker.get_performance(days=30)["overall"]["n"], 1)
+        self.assertEqual(self.tracker.get_performance(days=7)["overall"]["n"], 1)
+
+    def test_old_trade_excluded(self):
+        self._add(entry_days_ago=60, exit_days_ago=45)
+        self.assertEqual(self.tracker.get_performance(days=30)["overall"]["n"], 0)
+        self.assertEqual(self.tracker.get_performance()["overall"]["n"], 1)
+
+    def test_empty_period_reports_latest_trade(self):
+        self._add(entry_days_ago=60, exit_days_ago=45)
+        r = self.tracker.get_performance(days=30)
+        self.assertEqual(r["overall"]["n"], 0)
+        self.assertEqual(r["total_closed_all_time"], 1)      # 全期間仍有資料
+        self.assertIsNotNone(r["latest_trade_at"])           # 可顯示成因

@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.utils.models import TradeRecord, DailyStats
@@ -186,9 +187,18 @@ class OrderTracker:
                 q = q.filter(TradeRecord.bot_id == bot_id)
             if days is not None:
                 cutoff = _utc_now() - timedelta(days=days)
-                # entry_time 存的是 naive UTC，比較用 naive
-                q = q.filter(TradeRecord.entry_time >= cutoff.replace(tzinfo=None))
-            records = q.order_by(TradeRecord.entry_time).all()
+                # 以「平倉時間」界定期間 —— 本查詢只取已平倉交易，損益是在平倉當下實現的。
+                # 原本用 entry_time 會把「8 月開倉、9 月才平倉」的交易排除在近 30 天之外，
+                # 而 by_day 分組卻是用 exit_time，兩者語意不一致。
+                # exit_time 為空（理論上不應發生）時退回 entry_time，避免整筆消失。
+                cutoff_naive = cutoff.replace(tzinfo=None)
+                q = q.filter(
+                    func.coalesce(TradeRecord.exit_time, TradeRecord.entry_time)
+                    >= cutoff_naive
+                )
+            records = q.order_by(
+                func.coalesce(TradeRecord.exit_time, TradeRecord.entry_time)
+            ).all()
             rows = [
                 {
                     "bot_id": r.bot_id,
@@ -206,7 +216,26 @@ class OrderTracker:
                 }
                 for r in records
             ]
-            return full_breakdown(rows)
+            out = full_breakdown(rows)
+            # 不受期間篩選影響的「最近一筆平倉時間」與總筆數 ——
+            # 讓「此期間 0 筆」能顯示成因（資料太舊 / 根本沒在交易），而非一片空白
+            latest = (
+                session.query(
+                    func.max(func.coalesce(TradeRecord.exit_time, TradeRecord.entry_time))
+                )
+                .filter(TradeRecord.status == "CLOSED", TradeRecord.pnl.isnot(None))
+                .scalar()
+            )
+            total_closed = (
+                session.query(func.count(TradeRecord.id))
+                .filter(TradeRecord.status == "CLOSED", TradeRecord.pnl.isnot(None))
+                .scalar()
+            )
+            out["latest_trade_at"] = (
+                latest.isoformat() if hasattr(latest, "isoformat") else latest
+            )
+            out["total_closed_all_time"] = int(total_closed or 0)
+            return out
         finally:
             session.close()
 

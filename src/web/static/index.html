@@ -90,6 +90,16 @@
           </div>
         </div>
 
+        <div v-if="(perf.overall?.n ?? 0) === 0" class="pm-empty"
+             style="padding:16px;opacity:.85;line-height:1.7">
+          此期間沒有已平倉交易。
+          <template v-if="perf.total_closed_all_time > 0">
+            資料庫共有 {{ perf.total_closed_all_time }} 筆，最近一筆平倉於
+            <b>{{ (perf.latest_trade_at || '').slice(0, 16).replace('T', ' ') }}</b> (UTC)
+            —— 代表這段期間內沒有完成任何交易。
+          </template>
+          <template v-else>資料庫內沒有任何已平倉交易。</template>
+        </div>
         <div v-if="(perf.overall?.n ?? 0) > 0">
           <div class="perf-metrics">
             <div class="perf-metric">
