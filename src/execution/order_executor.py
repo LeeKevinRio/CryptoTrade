@@ -253,6 +253,59 @@ class OrderExecutor:
             self.logger.error("開倉失敗 %s: %s", symbol, e)
             return None
 
+    async def ensure_protection(self, symbol: str, pos_side: str,
+                                entry_price: float, quantity: float) -> dict:
+        """為「啟動時從交易所接管」的倉位補掛交易所端保護單。
+
+        正常開倉會同時掛 closePosition 停損單與 maker 停利階梯；但重啟後接管的倉位
+        只灌回本地狀態，交易所若已沒有這些掛單（先前被取消、測試網重置…），
+        倉位就只剩軟體風控守著。這裡檢查現有掛單，缺什麼補什麼。
+
+        價格已越過停損／停利價時交易所會拒單（會立即觸發），屬預期：軟體風控
+        會在下一秒以市價處理，這裡只記錄不拋錯。
+        回傳 {"stop": placed|exists|failed|skipped, "tp": ...} 供日誌／測試。
+        """
+        out = {"stop": "skipped", "tp": "skipped"}
+        if self.mode != "futures" or self.trading_disabled:
+            return out
+        try:
+            open_orders = await self.api.get_open_orders(symbol)
+        except Exception as e:
+            self.logger.warning("%s 查詢掛單失敗，略過補掛保護單: %s", symbol, e)
+            return out
+        types = {str(o.get("type", "")).upper() for o in open_orders}
+        close_side = "SELL" if pos_side == "LONG" else "BUY"
+
+        if "STOP_MARKET" in types:
+            out["stop"] = "exists"
+        else:
+            stop_price = self.pm.sl_manager.get_stop_price(symbol)
+            if stop_price:
+                try:
+                    await self.api.futures_stop_market(
+                        symbol=symbol, side=close_side,
+                        stop_price=self._round_price(symbol, stop_price),
+                        close_position=True,
+                    )
+                    out["stop"] = "placed"
+                except Exception as e:
+                    out["stop"] = "failed"
+                    self.logger.warning("%s 接管倉補掛停損失敗（軟體停損備援）: %s", symbol, e)
+
+        if self.config.get("risk", {}).get("use_maker_tp", False):
+            has_tp = any(
+                str(o.get("type", "")).upper() == "LIMIT"
+                and str(o.get("side", "")).upper() == close_side
+                and str(o.get("reduceOnly", "")).lower() in ("true", "1")
+                for o in open_orders
+            )
+            if has_tp:
+                out["tp"] = "exists"
+            else:
+                await self._place_tp_ladder(symbol, pos_side, entry_price, quantity)
+                out["tp"] = "placed"
+        return out
+
     async def _place_tp_ladder(self, symbol: str, pos_side: str,
                                entry_price: float, quantity: float):
         """把三階停利掛成 reduce-only + post-only(GTX) 限價單（maker 費率）"""

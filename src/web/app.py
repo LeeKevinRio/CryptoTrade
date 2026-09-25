@@ -189,6 +189,8 @@ def create_app(tracker=None) -> FastAPI:
             # 「為什麼沒有交易」：評估次數、可進場次數、實際開倉數與各阻擋原因
             "trade_gate": gate,
             "risk_state": bots_risk,
+            # 停損／停利是否真的有在檢查（ts 停在很久以前或 no_price 非空 = 沒在管倉）
+            "risk_heartbeat": dict(state.risk_heartbeat),
             "probes": {},
         }
         api = state.api_ref
