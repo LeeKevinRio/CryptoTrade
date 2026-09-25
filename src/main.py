@@ -154,6 +154,17 @@ class TradeBot:
                 if t["symbol"] == symbol and t["side"] == pos["side"]
             ]
             trade_id = matching[0]["id"] if matching else None
+            if trade_id is None:
+                # DB 沒有對應 OPEN 紀錄（重新部署清掉 DB、或倉位不是本 bot 開的）→
+                # 先補一筆 OPEN，否則之後平倉 record_close 找不到紀錄，績效頁永遠看不到
+                # 這筆交易（只會累進 DailyStats）。entry_time 只能記接管當下；真實進場
+                # 時間由交易所匯入去重補正。
+                trade_id = self.tracker.record_open({
+                    "bot_id": self.bot_id, "mode": self.mode,
+                    "symbol": symbol, "side": pos["side"],
+                    "entry_price": pos["entry_price"], "quantity": pos["quantity"],
+                    "strategy": "adopted",
+                })
 
             self.position_manager.open_position(
                 symbol=symbol,
