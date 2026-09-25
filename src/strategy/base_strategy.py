@@ -24,6 +24,9 @@ class Signal:
     # 可動作門檻：由策略依 config 的 medium_signal_threshold 帶入。
     # 預設 60 維持既有行為；調低可提高交易頻率（訊號較不嚴格）。
     min_strength: float = 60.0
+    # 聚合後的中性訊號保留兩邊原始強度（僅供診斷顯示）
+    long_strength: float = 0.0
+    short_strength: float = 0.0
 
     @property
     def is_actionable(self) -> bool:

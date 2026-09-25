@@ -168,6 +168,14 @@ class TradeBot:
                 "[%s] 🔄 同步既有倉 %s %s qty=%s entry=%.4f trade_id=%s",
                 self.bot_id, symbol, pos["side"], pos["quantity"], pos["entry_price"], trade_id,
             )
+            # 接管的倉位交易所端可能已無停損／停利掛單 → 補上，別只靠軟體風控
+            try:
+                prot = await self.executor.ensure_protection(
+                    symbol, pos["side"], pos["entry_price"], pos["quantity"],
+                )
+                self.logger.info("[%s] 🛡️ %s 保護單檢查: %s", self.bot_id, symbol, prot)
+            except Exception as e:  # noqa: BLE001 — 保護單失敗不得阻斷啟動
+                self.logger.warning("[%s] %s 補掛保護單失敗: %s", self.bot_id, symbol, e)
 
         # 3. DB 中 OPEN 但 Binance 沒有的 → 標記為「不一致已平」
         for trade in db_open:
@@ -235,15 +243,23 @@ class TradeBot:
         await bus.publish(f"signal.{self.bot_id}", signal_payload)
 
         # 記錄這次評估的結果，供 /api/diag 回答「為什麼沒有交易」
+        detail = {
+            "type": signal.type.value,
+            "strength": round(signal.strength, 1),
+            "long": round(signal.long_strength, 1),
+            "short": round(signal.short_strength, 1),
+        }
         if not signal.is_actionable:
             reason = signal.reasons[0] if signal.reasons else "訊號強度不足"
             if "趨勢過濾" in reason:
                 reason = "趨勢過濾擋下逆勢訊號"
+            elif "衝突" in reason:
+                reason = "多空訊號衝突"
             else:
-                reason = f"訊號未達門檻（強度 {signal.strength:.0f}）"
-            note_gate(symbol, reason, evaluated=True)
+                reason = "訊號未達門檻"
+            note_gate(symbol, reason, evaluated=True, detail=detail)
         else:
-            note_gate(symbol, None, evaluated=True, actionable=True)
+            note_gate(symbol, None, evaluated=True, actionable=True, detail=detail)
 
         if signal.is_actionable:
             self.logger.info(
@@ -341,10 +357,22 @@ class TradeBot:
                     await asyncio.sleep(5)
                     continue
 
+                hb = state.risk_heartbeat
                 for symbol in list(self.position_manager.all_positions.keys()):
                     price = self.candle_manager.get_latest_price(symbol)
                     if price is None:
+                        # 沒價就不能檢查停損 —— 但絕不能沉默：曾因此整月未檢查任何倉位
+                        n = hb["no_price"].get(symbol, 0) + 1
+                        hb["no_price"][symbol] = n
+                        if n == 1 or n % 300 == 0:
+                            self.logger.error(
+                                "[%s] ⚠️ %s 取不到最新價，停損／停利無法檢查（已連續 %d 次）",
+                                self.bot_id, symbol, n,
+                            )
                         continue
+                    hb["no_price"].pop(symbol, None)
+                    hb["checked"] += 1
+                    hb["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     actions = self.position_manager.check_risk(symbol, price)
                     for action in actions:
                         qty = action.get("quantity", 0)

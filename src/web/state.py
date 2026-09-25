@@ -41,14 +41,30 @@ class GlobalState:
     # {"evaluated": n, "opened": n, "blocked": {原因: 次數}, "last": {...}}
     trade_gate: dict[str, Any] = field(default_factory=lambda: {
         "evaluated": 0, "actionable": 0, "opened": 0, "blocked": {}, "last": None,
+        # 每個標的最近一次評估的多／空原始強度，讓「未達門檻」看得出差多少
+        "by_symbol": {},
+    })
+    # 風控迴圈心跳 —— 回答「停損／停利到底有沒有在檢查」：
+    # {"ts": 最近一次檢查時間, "checked": 累計檢查次數, "no_price": {symbol: 次數}}
+    risk_heartbeat: dict[str, Any] = field(default_factory=lambda: {
+        "ts": None, "checked": 0, "no_price": {},
     })
 
 
 def note_gate(symbol: str, reason: str | None, *, evaluated: bool = False,
-              actionable: bool = False, opened: bool = False):
-    """記錄一次進場決策。reason 為 None 表示通過（實際開倉）。"""
+              actionable: bool = False, opened: bool = False,
+              detail: dict | None = None):
+    """記錄一次進場決策。reason 為 None 表示通過（實際開倉）。
+
+    detail：該次評估的補充資訊（多／空原始強度等），按標的保留最近一筆。
+    """
     from datetime import datetime, timezone
     g = state.trade_gate
+    if detail is not None:
+        g.setdefault("by_symbol", {})[symbol] = {
+            **detail,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
     if evaluated:
         g["evaluated"] += 1
     if actionable:

@@ -108,8 +108,19 @@ class SignalAggregator:
         if short_signal.is_actionable:
             return short_signal
 
-        # 無明確訊號
-        return Signal(type=SignalType.NEUTRAL, symbol=symbol, strength=0)
+        # 無明確訊號 —— 保留多／空原始強度（type 為 NEUTRAL 故仍不可動作），
+        # 診斷端點才看得出「差門檻多少」，而不是永遠顯示強度 0
+        return Signal(
+            type=SignalType.NEUTRAL, symbol=symbol,
+            strength=max(long_signal.strength, short_signal.strength),
+            reasons=[
+                f"未達門檻：多 {long_signal.strength:.0f}／空 "
+                f"{short_signal.strength:.0f}（門檻 {self.medium_threshold}）"
+            ],
+            price=long_signal.price or short_signal.price,
+            long_strength=long_signal.strength,
+            short_strength=short_signal.strength,
+        )
 
     def get_position_size_ratio(self, signal: Signal) -> float:
         """根據訊號強度決定倉位比例"""

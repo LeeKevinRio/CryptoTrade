@@ -254,6 +254,11 @@ class BinanceAPI:
         await self.client.futures_cancel_all_open_orders(symbol=symbol)
         logger.info("已取消 %s 所有掛單", symbol)
 
+    @with_retry()
+    async def get_open_orders(self, symbol: str) -> list[dict]:
+        """該標的目前所有未成交掛單（含停損／停利條件單）"""
+        return await self.client.futures_get_open_orders(symbol=symbol)
+
     # ── 現貨交易 ──
 
     @with_retry()

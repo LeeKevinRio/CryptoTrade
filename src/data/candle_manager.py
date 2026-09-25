@@ -17,6 +17,8 @@ class CandleManager:
         self.max_candles = max_candles
         # {(symbol, interval): DataFrame}
         self._candles: dict[tuple[str, str], pd.DataFrame] = {}
+        # {symbol: 最後一筆 K 線 tick 的收盤價}（不分時框，含未收盤的 K 線）
+        self._last_prices: dict[str, float] = {}
 
     def init_from_klines(self, symbol: str, interval: str, raw_klines: list[list]):
         rows = []
@@ -32,11 +34,14 @@ class CandleManager:
         df = pd.DataFrame(rows, columns=KLINE_COLUMNS)
         df.set_index("timestamp", inplace=True)
         self._candles[(symbol, interval)] = df
+        if not df.empty:
+            self._last_prices.setdefault(symbol, float(df["close"].iloc[-1]))
         logger.info("初始化 %s %s K線: %d 根", symbol, interval, len(df))
 
     def update_candle(self, symbol: str, interval: str, data: dict):
         key = (symbol, interval)
         ts = pd.to_datetime(data["timestamp"], unit="ms")
+        self._last_prices[symbol] = float(data["close"])
         row = {
             "open": data["open"],
             "high": data["high"],
@@ -67,10 +72,34 @@ class CandleManager:
     def get_candles(self, symbol: str, interval: str) -> pd.DataFrame | None:
         return self._candles.get((symbol, interval))
 
-    def get_latest_price(self, symbol: str, interval: str = "1m") -> float | None:
-        df = self.get_candles(symbol, interval)
-        if df is not None and not df.empty:
-            return float(df["close"].iloc[-1])
+    @staticmethod
+    def _interval_seconds(interval: str) -> int:
+        unit = interval[-1]
+        n = int(interval[:-1]) if interval[:-1].isdigit() else 0
+        return n * {"m": 60, "h": 3600, "d": 86400, "w": 604800}.get(unit, 10**9)
+
+    def get_latest_price(self, symbol: str, interval: str | None = None) -> float | None:
+        """該標的最新價。
+
+        優先用最後一筆 WebSocket tick（任何時框、含未收盤 K 線），
+        其次退回「訂閱中最短時框」的最後收盤價。
+        ⚠️ 不能寫死某個時框：先前預設 1m，但 1m 已從訂閱清單移除後
+        這裡就一直回 None，風控迴圈因此整整一個月沒檢查過任何停損／停利。
+        """
+        if symbol in self._last_prices:
+            return self._last_prices[symbol]
+        if interval is not None:
+            df = self.get_candles(symbol, interval)
+            if df is not None and not df.empty:
+                return float(df["close"].iloc[-1])
+        keys = sorted(
+            (k for k in self._candles if k[0] == symbol),
+            key=lambda k: self._interval_seconds(k[1]),
+        )
+        for key in keys:
+            df = self._candles[key]
+            if df is not None and not df.empty:
+                return float(df["close"].iloc[-1])
         return None
 
     def get_volume_sma(self, symbol: str, interval: str, period: int = 20) -> float | None:
