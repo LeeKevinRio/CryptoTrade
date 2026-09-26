@@ -37,6 +37,36 @@ def group_fills_into_trades(fills: list[dict]) -> list[dict]:
     """
     trades: list[dict] = []
     pos = 0.0            # 帶號部位
+    # 「孤兒出場」：查詢窗口之前就開的倉，窗口內只看得到平倉成交（pos==0 但 realizedPnl≠0）。
+    # 原本被當成開新倉、永遠等不到平倉而整筆消失 —— ETH/BNB 持倉一個月後平掉的 +200U
+    # 就是這樣從績效頁不見的。這裡把連續的孤兒平倉成交合併成一筆，
+    # 進場價由 realizedPnl 反推（多：entry = price − pnl/qty）。
+    orphan: dict | None = None
+
+    def _flush_orphan():
+        nonlocal orphan
+        if not orphan:
+            return
+        o = orphan
+        exit_avg = o["exit_cost"] / o["qty"]
+        entry_avg = exit_avg - o["pnl"] / o["qty"] if o["side"] == "LONG" \
+            else exit_avg + o["pnl"] / o["qty"]
+        pnl_pct = (o["pnl"] / (entry_avg * o["qty"]) * 100) if entry_avg else 0.0
+        trades.append({
+            "symbol": o["symbol"],
+            "side": o["side"],
+            "entry_price": round(entry_avg, 8),
+            "exit_price": round(exit_avg, 8),
+            "quantity": round(o["qty"], 8),
+            "pnl": round(o["pnl"], 6),
+            "pnl_pct": round(pnl_pct, 4),
+            "commission": round(o["commission"], 6),
+            "entry_time": None,                 # 窗口之前，未知 → 寫入時以 exit_time 代替
+            "exit_time": _ts(o["last_ms"]),
+            "exchange_ref": f"{o['symbol']}:{o['last_id']}",
+            "entry_unknown": True,
+        })
+        orphan = None
     entry_cost = 0.0     # Σ price×qty（開倉側）
     entry_qty = 0.0
     exit_cost = 0.0
@@ -62,6 +92,23 @@ def group_fills_into_trades(fills: list[dict]) -> list[dict]:
         t = int(f["time"])
 
         remaining = signed
+        if abs(pos) < _EPS and abs(pnl) > _EPS:
+            # 孤兒平倉：沒有對應的開倉成交（倉位早於查詢窗口）
+            side = "LONG" if signed < 0 else "SHORT"
+            if orphan and (orphan["side"] != side or orphan["symbol"] != symbol):
+                _flush_orphan()
+            if orphan is None:
+                orphan = {"symbol": symbol, "side": side, "exit_cost": 0.0, "qty": 0.0,
+                          "pnl": 0.0, "commission": 0.0, "last_ms": t, "last_id": f["id"]}
+            orphan["exit_cost"] += price * qty
+            orphan["qty"] += qty
+            orphan["pnl"] += pnl
+            orphan["commission"] += fee
+            orphan["last_ms"] = t
+            orphan["last_id"] = f["id"]
+            continue
+        if orphan is not None:
+            _flush_orphan()          # 真正的開倉來了 → 孤兒段結束
         while abs(remaining) > _EPS:
             if abs(pos) < _EPS:
                 # 開新倉
@@ -111,6 +158,7 @@ def group_fills_into_trades(fills: list[dict]) -> list[dict]:
                         "exchange_ref": f"{symbol}:{f['id']}",
                     })
                     _reset()
+    _flush_orphan()
     return trades
 
 
@@ -168,9 +216,11 @@ async def import_trades(api, session_factory, symbols: list[str], days: int,
                     symbol=tr["symbol"], side=tr["side"],
                     entry_price=tr["entry_price"], exit_price=tr["exit_price"],
                     quantity=tr["quantity"], pnl=tr["pnl"], pnl_pct=tr["pnl_pct"],
-                    entry_time=tr["entry_time"], exit_time=tr["exit_time"],
+                    entry_time=tr["entry_time"] or tr["exit_time"], exit_time=tr["exit_time"],
                     strategy="exchange_import", status="CLOSED",
-                    close_reason=IMPORT_REASON, exchange_ref=tr["exchange_ref"],
+                    close_reason=(IMPORT_REASON + "（進場早於查詢窗口）"
+                                  if tr.get("entry_unknown") else IMPORT_REASON),
+                    exchange_ref=tr["exchange_ref"],
                     commission=tr["commission"],
                 ))
                 stats["inserted"] += 1
