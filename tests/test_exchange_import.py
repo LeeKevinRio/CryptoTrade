@@ -120,3 +120,68 @@ class TestImportDedupe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOrphanExitFills(unittest.TestCase):
+    """窗口之前開的倉、窗口內只有平倉成交 → 仍要匯成一筆（進場價由 realizedPnl 反推）"""
+
+    def _fill(self, i, side, qty, price, pnl, t, fee="0.01"):
+        return {"id": i, "symbol": "ETHUSDT", "side": side, "qty": str(qty), "price": str(price),
+                "realizedPnl": str(pnl), "commission": fee, "time": t}
+
+    def test_single_orphan_exit(self):
+        # 多單 0.476 @2421 在窗口外開；窗口內 SELL 0.476 @2674，realizedPnl = 253×0.476
+        fills = [self._fill(1, "SELL", 0.476, 2674.0, 253 * 0.476, 1_700_000_000_000)]
+        trades = group_fills_into_trades(fills)
+        self.assertEqual(len(trades), 1)
+        t = trades[0]
+        self.assertEqual(t["side"], "LONG")
+        self.assertAlmostEqual(t["entry_price"], 2421.0, places=4)
+        self.assertAlmostEqual(t["pnl"], 253 * 0.476, places=4)
+        self.assertTrue(t["entry_unknown"])
+
+    def test_ladder_orphan_exits_merge_into_one(self):
+        # 階梯 40/35/25 三段平倉 → 合併成一筆
+        fills = [
+            self._fill(1, "SELL", 0.4, 110.0, 4.0, 1_700_000_000_000),
+            self._fill(2, "SELL", 0.35, 120.0, 7.0, 1_700_000_060_000),
+            self._fill(3, "SELL", 0.25, 130.0, 7.5, 1_700_000_120_000),
+        ]
+        trades = group_fills_into_trades(fills)
+        self.assertEqual(len(trades), 1)
+        self.assertAlmostEqual(trades[0]["quantity"], 1.0)
+        self.assertAlmostEqual(trades[0]["pnl"], 18.5)
+        self.assertEqual(trades[0]["exchange_ref"], "ETHUSDT:3")
+
+    def test_orphan_then_real_round_trip(self):
+        fills = [
+            self._fill(1, "SELL", 1.0, 110.0, 10.0, 1_700_000_000_000),      # 孤兒平倉
+            self._fill(2, "BUY", 1.0, 100.0, 0, 1_700_000_060_000),         # 真開倉
+            self._fill(3, "SELL", 1.0, 105.0, 5.0, 1_700_000_120_000),      # 真平倉
+        ]
+        trades = group_fills_into_trades(fills)
+        self.assertEqual(len(trades), 2)
+        self.assertTrue(trades[0].get("entry_unknown"))
+        self.assertFalse(trades[1].get("entry_unknown", False))
+        self.assertAlmostEqual(trades[1]["entry_price"], 100.0)
+
+    def test_orphan_short_exit(self):
+        # 空單在窗口外開；BUY 平倉，pnl 為正 → entry = price + pnl/qty
+        fills = [self._fill(1, "BUY", 2.0, 90.0, 20.0, 1_700_000_000_000)]
+        t = group_fills_into_trades(fills)[0]
+        self.assertEqual(t["side"], "SHORT")
+        self.assertAlmostEqual(t["entry_price"], 100.0)
+
+    def test_orphan_persisted_with_exit_time_as_entry(self):
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+        from src.utils.models import TradeRecord, init_db
+        sf = init_db("sqlite:///:memory:")
+        api = MagicMock(get_account_trades=AsyncMock(return_value=[
+            self._fill(1, "SELL", 1.0, 110.0, 10.0, 1_700_000_000_000)]))
+        asyncio.run(import_trades(api, sf, ["ETHUSDT"], 30))
+        with sf() as s:
+            r = s.query(TradeRecord).one()
+            self.assertIsNotNone(r.entry_time)
+            self.assertEqual(r.entry_time, r.exit_time)
+            self.assertIn("早於查詢窗口", r.close_reason)
