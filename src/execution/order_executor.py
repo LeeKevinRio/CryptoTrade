@@ -148,7 +148,8 @@ class OrderExecutor:
         # 用該標的「實際生效」的槓桿計算部位 —— 標的槓桿上限低於設定值時
         # 已自動退階，沿用設定值會高估可開名目
         eff_leverage = self._symbol_info.get(symbol, {}).get("leverage", self.leverage)
-        size_ratio = 1.0 if signal.strength >= 70 else 0.5
+        strong = self.config.get("strategy", {}).get("strong_signal_threshold", 70)
+        size_ratio = 1.0 if signal.strength >= strong else 0.5
         quantity = self.pm.capital_manager.calculate_position_size(
             balance=balance,
             price=signal.price,

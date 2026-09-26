@@ -236,3 +236,29 @@ class TestDailyTradeCounting(unittest.TestCase):
             pm.close_position("BTCUSDT", 103)                 # 全平
             self.assertEqual(cm.daily_trades, i + 1)
         self.assertFalse(cm.can_trade(10000)[0])              # 第 21 筆才擋
+
+
+class TestTimeStopDisabled(unittest.TestCase):
+    """time_stop_seconds: null/0 → 時間停損停用，不得拋錯、不得平倉"""
+
+    def _tp(self, value):
+        cfg = copy.deepcopy(BASE_CONFIG)
+        cfg["risk"]["time_stop_seconds"] = value
+        tp = TakeProfitManager(cfg)
+        tp.register_position("BTCUSDT", "LONG", 50000, 1.0)
+        tp._states["BTCUSDT"].entry_time -= 10 * 3600   # 已持倉 10 小時
+        return tp
+
+    def test_none_disables(self):
+        tp = self._tp(None)
+        self.assertEqual(tp.check("BTCUSDT", 50010), [])   # 無波動也不平
+
+    def test_zero_disables(self):
+        tp = self._tp(0)
+        self.assertEqual(tp.check("BTCUSDT", 50010), [])
+
+    def test_positive_still_fires(self):
+        tp = self._tp(2400)
+        actions = tp.check("BTCUSDT", 50010)
+        self.assertEqual(len(actions), 1)
+        self.assertIn("時間停損", actions[0]["reason"])

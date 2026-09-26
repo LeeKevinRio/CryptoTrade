@@ -42,7 +42,7 @@ class TakeProfitState:
     trailing_callback_pct: float = 0.5
 
     # 時間停利
-    time_stop_seconds: int = 1800
+    time_stop_seconds: int | None = 1800     # None / 0 = 停用時間停損
     time_stop_no_movement_pct: float = 0.4   # MFE/|MAE| 都 < 此值才視為無波動可平        # 30 分鐘
 
 
@@ -175,7 +175,8 @@ class TakeProfitManager:
         # 改版理念：不再因「超時 + 小幅虧損」就硬平倉，避免把還沒走完的單砍掉
         # 只有在超時 *且* 倉位生命週期內價格 max excursion 兩側都未達門檻時，
         # 才視為「沒走勢、卡資金」並出場；有走勢就交給 trailing / SL / L1 處理
-        if state.remaining_quantity > 0:
+        # time_stop_seconds 為 None / 0 → 停用（2026-09-26 掃描：關閉時停全標的淨正組合數最多）
+        if state.remaining_quantity > 0 and state.time_stop_seconds:
             elapsed = time.time() - state.entry_time
             if elapsed > state.time_stop_seconds:
                 l1_triggered = state.levels and state.levels[0].triggered

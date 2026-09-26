@@ -12,6 +12,10 @@ on:
         description: "回測天數"
         required: false
         default: "90"
+      thresholds:
+        description: "同時掃的進場門檻（逗號分隔）"
+        required: false
+        default: "40,45,50,55"
   # 整合權限無法手動 dispatch 時的替代觸發：更新觸發檔即開跑
   push:
     paths:
@@ -56,7 +60,8 @@ jobs:
         env:
           BINANCE_API_KEY: backtest-offline
           BINANCE_API_SECRET: backtest-offline
-        run: python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --rank expectancy --min-trades 15 --dump-csv reports/sweep-full-${{ matrix.symbol }}.csv
+        # 出場模擬為實盤階梯語義；排序用扣費淨期望；同時掃進場門檻
+        run: python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --rank net --min-trades 15 --thresholds "${{ inputs.thresholds || '40,45,50,55' }}" --dump-csv reports/sweep-full-${{ matrix.symbol }}.csv
 
       - uses: actions/upload-artifact@v4
         with:
@@ -82,10 +87,15 @@ jobs:
           path: /tmp/sweep-artifacts
           merge-multiple: true
 
-      - name: 提交報告回分支
+      - name: 跨標的彙整（現役標的全數淨正才算通過）
         run: |
           mkdir -p reports
           cp /tmp/sweep-artifacts/*.md /tmp/sweep-artifacts/*.csv reports/ 2>/dev/null || true
+          pip install pyyaml
+          python -m scripts.sweep_consensus --write reports/sweep-consensus-$(date -u +%F).md || true
+
+      - name: 提交報告回分支
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin ${{ github.ref_name }} || true
