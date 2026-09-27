@@ -262,3 +262,22 @@ class TestTimeStopDisabled(unittest.TestCase):
         actions = tp.check("BTCUSDT", 50010)
         self.assertEqual(len(actions), 1)
         self.assertIn("時間停損", actions[0]["reason"])
+
+
+class TestDailyLossGateWithUnknownBalance(unittest.TestCase):
+    def test_zero_balance_does_not_trigger_daily_loss(self):
+        pm = PositionManager(copy.deepcopy(BASE_CONFIG))
+        cm = pm.capital_manager
+        ok, reason = cm.can_trade(0.0)          # 餘額未知、日損益 0
+        self.assertNotIn("每日最大虧損", reason)
+        cm._daily_pnl = -1.0
+        ok, reason = cm.can_trade(0.0)          # 餘額未知、小虧 → 仍不該被日虧上限擋
+        self.assertNotIn("每日最大虧損", reason)
+
+    def test_real_daily_loss_still_blocks(self):
+        pm = PositionManager(copy.deepcopy(BASE_CONFIG))
+        cm = pm.capital_manager
+        cm._daily_pnl = -300.0                  # 25% of 1000 > max_daily_loss 25%
+        ok, reason = cm.can_trade(1000.0)
+        self.assertFalse(ok)
+        self.assertIn("每日最大虧損", reason)

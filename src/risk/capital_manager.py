@@ -73,9 +73,12 @@ class CapitalManager:
         if self._daily_trades >= self.max_daily_trades:
             return False, f"已達每日最大交易次數 {self.max_daily_trades}"
 
-        max_loss = balance * (self.max_daily_loss_pct / 100)
-        if self._daily_pnl <= -max_loss:
-            return False, f"已達每日最大虧損 {self.max_daily_loss_pct}%"
+        # 餘額尚未取得（啟動初期 balance_loop 還沒跑）時 max_loss=0，
+        # daily_pnl<=0 會被誤判「已達每日最大虧損」；Render 常重啟，每次都會白丟一個訊號
+        if balance > 0:
+            max_loss = balance * (self.max_daily_loss_pct / 100)
+            if self._daily_pnl <= -max_loss:
+                return False, f"已達每日最大虧損 {self.max_daily_loss_pct}%"
 
         if (
             self.max_consecutive_losses > 0
