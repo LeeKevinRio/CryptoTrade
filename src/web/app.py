@@ -209,6 +209,36 @@ def create_app(tracker=None) -> FastAPI:
         await probe("usdt_balance", api.get_usdt_balance())
         return out
 
+    @app.get("/api/diag/fills/{symbol}")
+    async def diag_fills(symbol: str, days: int = 7):
+        """交易所原始成交（fills）＋匯入器的重組結果 —— 查「這筆平倉為什麼沒進績效」。
+        重新部署後績效全靠交易所匯入重建，重組錯一筆就少一筆；這裡把原料與成品並列。
+        """
+        from src.execution.exchange_import import group_fills_into_trades
+        api = state.api_ref
+        if api is None:
+            return {"error": "引擎尚未建構 API 連線"}
+        import time as _time
+        days = max(1, min(int(days), 30))
+        start_ms = int(_time.time() * 1000) - days * 86_400_000
+        try:
+            fills = await api.get_account_trades(symbol.upper(), start_ms)
+        except Exception as e:  # noqa: BLE001 — 診斷端點如實回報
+            return {"error": f"{type(e).__name__}: {e}"}
+        slim = [
+            {k: f.get(k) for k in (
+                "id", "orderId", "time", "side", "positionSide", "price", "qty",
+                "realizedPnl", "commission", "maker", "buyer",
+            )}
+            for f in fills
+        ]
+        trades = group_fills_into_trades(fills)
+        for t in trades:
+            for k in ("entry_time", "exit_time"):
+                if t.get(k) is not None:
+                    t[k] = t[k].isoformat()
+        return {"symbol": symbol.upper(), "days": days, "fills": slim, "grouped": trades}
+
     @app.get("/api/status")
     async def get_status():
         return {
