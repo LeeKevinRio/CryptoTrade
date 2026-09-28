@@ -124,13 +124,23 @@ class TradeBot:
         """啟動三向對帳：Binance 實際倉、本地 PM、DB OPEN 紀錄三者一致"""
         if self.mode != "futures":
             return
+        def _log(symbol, action, detail=""):
+            state.adoption_log.append({
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "bot": self.bot_id, "symbol": symbol, "action": action, "detail": str(detail)[:200],
+            })
+            del state.adoption_log[:-50]
+
         try:
             existing = await self.api.get_open_positions()
         except Exception as e:
             self.logger.warning("[%s] 取得 Binance 持倉失敗: %s", self.bot_id, e)
+            _log("*", "error", f"get_open_positions: {e}")
             existing = []
 
         existing_by_symbol = {p["symbol"]: p for p in existing}
+        _log("*", "exchange", f"{len(existing)} 檔: " + ", ".join(
+            f"{p['symbol']} {p['side']} {p['quantity']}" for p in existing))
 
         # 1. DB 中本 bot 的所有 OPEN 紀錄
         db_open = self.tracker.get_open_trades(bot_id=self.bot_id)
@@ -142,8 +152,10 @@ class TradeBot:
                 self.logger.info(
                     "[%s] 略過孤兒倉 %s（不在本 bot 交易對）", self.bot_id, symbol,
                 )
+                _log(symbol, "skipped", "不在本 bot 交易對")
                 continue
             if self.position_manager.has_position(symbol):
+                _log(symbol, "skipped", "本地已有持倉")
                 continue
             df = self.candle_manager.get_candles(symbol, "5m")
             atr = get_current_atr(df) if df is not None else None
@@ -166,15 +178,21 @@ class TradeBot:
                     "strategy": "adopted",
                 })
 
-            self.position_manager.open_position(
-                symbol=symbol,
-                side=pos["side"],
-                entry_price=pos["entry_price"],
-                quantity=pos["quantity"],
-                leverage=pos.get("leverage", self.config.get("leverage", 1)),
-                atr=atr,
-                trade_id=trade_id,
-            )
+            try:
+                self.position_manager.open_position(
+                    symbol=symbol,
+                    side=pos["side"],
+                    entry_price=pos["entry_price"],
+                    quantity=pos["quantity"],
+                    leverage=pos.get("leverage", self.config.get("leverage", 1)),
+                    atr=atr,
+                    trade_id=trade_id,
+                )
+            except Exception as e:  # noqa: BLE001 — 一檔接管失敗不得讓其餘倉位也沒人管
+                self.logger.error("[%s] 接管 %s 失敗: %s", self.bot_id, symbol, e)
+                _log(symbol, "error", f"open_position: {e}")
+                continue
+            _log(symbol, "adopted", f"{pos['side']} qty={pos['quantity']} entry={pos['entry_price']}")
             self.logger.warning(
                 "[%s] 🔄 同步既有倉 %s %s qty=%s entry=%.4f trade_id=%s",
                 self.bot_id, symbol, pos["side"], pos["quantity"], pos["entry_price"], trade_id,

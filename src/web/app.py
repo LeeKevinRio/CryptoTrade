@@ -191,6 +191,13 @@ def create_app(tracker=None) -> FastAPI:
             "risk_state": bots_risk,
             # 停損／停利是否真的有在檢查（ts 停在很久以前或 no_price 非空 = 沒在管倉）
             "risk_heartbeat": dict(state.risk_heartbeat),
+            # 交易所真實持倉（reconcile 每 30 秒更新）與啟動接管紀錄 ——
+            # 對照 /api/bots/*/positions 可看出「交易所有、bot 沒接管」的倉
+            "exchange_positions": {
+                s: {k: p.get(k) for k in ("side", "quantity", "entry_price", "unrealized_pnl", "leverage")}
+                for s, p in state.exchange_positions.items()
+            },
+            "adoption_log": list(state.adoption_log),
             "probes": {},
         }
         api = state.api_ref
