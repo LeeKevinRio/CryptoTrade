@@ -63,19 +63,20 @@ class TestLeverageFallback(unittest.TestCase):
         self.assertEqual(ex._symbol_info["XPLUSDT"]["leverage"], 20)  # 退為上限
         api.set_leverage.assert_called_with("XPLUSDT", 20)
 
-    def test_persistent_failure_drops_symbol_not_engine(self):
+    def test_leverage_failure_keeps_symbol_with_config_leverage(self):
+        # 2026-09-28 起：設槓桿失敗不再剔除標的（線上曾因交易所有 25x 既有持倉、
+        # 5x 設不進去而靜默停掉 BTC/ETH/BNB）。查不到交易所現值時沿用設定值。
         ex, api = make_executor()
-        api.set_leverage = AsyncMock(side_effect=Exception("other error"))
-        symbols = ["BADUSDT", "BTCUSDT"]
-        # 第二個標的正常：換一個乾淨 mock 序列
+        api.get_open_positions = AsyncMock(return_value=[])
         def side_effect(symbol, lev):
             if symbol == "BADUSDT":
                 raise Exception("other error")
         api.set_leverage = AsyncMock(side_effect=side_effect)
+        symbols = ["BADUSDT", "BTCUSDT"]
         asyncio.run(ex.init_symbol_info(symbols))
-        self.assertEqual(symbols, ["BTCUSDT"])            # 壞標的就地剔除
-        self.assertNotIn("BADUSDT", ex._symbol_info)
-        self.assertIn("BTCUSDT", ex._symbol_info)         # 好標的不受影響
+        self.assertEqual(symbols, ["BADUSDT", "BTCUSDT"])
+        self.assertEqual(ex._symbol_info["BADUSDT"]["leverage"], 25)
+        self.assertIn("BTCUSDT", ex._symbol_info)
 
     def test_missing_info_drops_symbol(self):
         ex, api = make_executor()
@@ -87,3 +88,26 @@ class TestLeverageFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLeverageChangeBlockedByOpenPosition(unittest.TestCase):
+    """交易所有既有持倉、改槓桿被拒 → 不得剔除標的，沿用交易所現值"""
+
+    def test_symbol_kept_with_exchange_leverage(self):
+        ex, api = make_executor()
+        api.set_leverage = AsyncMock(side_effect=Exception(
+            "APIError(code=-4161): Leverage reduction is not supported in Isolated Margin Mode with open positions"))
+        api.get_open_positions = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.027, "entry_price": 84064.0, "leverage": 25}])
+        symbols = ["BTCUSDT", "ETHUSDT"]
+        asyncio.run(ex.init_symbol_info(symbols))
+        self.assertEqual(symbols, ["BTCUSDT", "ETHUSDT"])            # 沒被剔除
+        self.assertEqual(ex._symbol_info["BTCUSDT"]["leverage"], 25)  # 沿用交易所現值
+        self.assertEqual(ex._symbol_info["ETHUSDT"]["leverage"], 25)  # 無持倉查不到 → 設定值
+
+    def test_missing_contract_info_still_dropped(self):
+        ex, api = make_executor()
+        api.get_symbol_info = AsyncMock(return_value={})
+        symbols = ["NOPEUSDT"]
+        asyncio.run(ex.init_symbol_info(symbols))
+        self.assertEqual(symbols, [])
