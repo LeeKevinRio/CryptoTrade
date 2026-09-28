@@ -609,6 +609,44 @@ def create_app(tracker=None) -> FastAPI:
         await bus.publish(f"order_close.{bot_id}", result)
         return {"ok": True, "result": result}
 
+    @app.post("/api/diag/close_orphan/{symbol}", dependencies=[Depends(require_auth)])
+    async def close_orphan(symbol: str):
+        """平掉交易所上「不屬於任何 bot」的孤兒倉（另一個實例留下、沒人管的部位）。
+
+        reduceOnly 市價單全平 + 取消該標的所有掛單，然後立刻匯入該標的成交，
+        讓這筆平倉出現在績效與交易列表。bot 自己管理的倉位請走 /actions/close。
+        """
+        from src.execution.exchange_import import import_trades
+        api = state.api_ref
+        if api is None:
+            raise HTTPException(503, "引擎尚未建構 API 連線")
+        symbol = symbol.upper()
+        for b in state.bots.values():
+            if b.bot_ref and b.bot_ref.position_manager.has_position(symbol):
+                raise HTTPException(409, f"{symbol} 由 bot {b.bot_id} 管理中，請用 /actions/close")
+        positions = await api.get_open_positions()
+        pos = next((p for p in positions if p["symbol"] == symbol), None)
+        if not pos:
+            raise HTTPException(404, f"交易所無 {symbol} 持倉")
+        try:
+            await api.cancel_all_orders(symbol)
+        except Exception:  # noqa: BLE001 — 沒掛單也無妨
+            pass
+        close_side = "SELL" if pos["side"] == "LONG" else "BUY"
+        order = await api.futures_market_order(
+            symbol=symbol, side=close_side, quantity=pos["quantity"], reduce_only=True,
+        )
+        stats = None
+        if tracker is not None:
+            try:
+                stats = await import_trades(api, tracker.session_factory, [symbol], 30)
+            except Exception as e:  # noqa: BLE001 — 匯入失敗不影響已成交的平倉
+                stats = {"error": str(e)}
+        return {
+            "ok": True, "closed": pos, "order_id": order.get("orderId"),
+            "avg_price": order.get("avgPrice"), "import": stats,
+        }
+
     @app.post("/api/bots/{bot_id}/actions/force_trade", dependencies=[Depends(require_auth)])
     async def force_trade(bot_id: str, req: ForceTradeRequest):
         """強制下單測試 — 跳過訊號條件，僅 Testnet 建議使用"""
