@@ -44,6 +44,9 @@ class GlobalState:
         # 每個標的最近一次評估的多／空原始強度，讓「未達門檻」看得出差多少
         "by_symbol": {},
     })
+    # 啟動接管紀錄 —— 回答「交易所有倉，為什麼 bot 沒接管」：
+    # [{"ts", "symbol", "action": adopted|skipped|error|orphan_cleaned, "detail"}]
+    adoption_log: list[dict] = field(default_factory=list)
     # 風控迴圈心跳 —— 回答「停損／停利到底有沒有在檢查」：
     # {"ts": 最近一次檢查時間, "checked": 累計檢查次數, "no_price": {symbol: 次數}}
     risk_heartbeat: dict[str, Any] = field(default_factory=lambda: {
