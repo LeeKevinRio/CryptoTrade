@@ -89,13 +89,34 @@ class OrderExecutor:
                     await self.api.set_margin_type(
                         symbol, self.config.get("margin_type", "CROSSED"),
                     )
-                    eff_lev = await self._set_leverage_with_fallback(symbol)
+                    try:
+                        eff_lev = await self._set_leverage_with_fallback(symbol)
+                    except Exception as e:  # noqa: BLE001
+                        # 交易所有既有持倉時不允許改槓桿（逐倉降槓桿 -4161 等）——
+                        # 這不是標的的問題，剔除它等於把已開的倉丟給沒人管，
+                        # 且從此不再交易該標的（線上曾因此靜默停掉 BTC/ETH/BNB）。
+                        # 沿用交易所目前的槓桿續行，接管後由風控保護。
+                        eff_lev = await self._exchange_leverage(symbol) or self.leverage
+                        self.logger.warning(
+                            "⚠️ %s 無法設定 %dx 槓桿（%s），沿用交易所現值 %dx 續行",
+                            symbol, self.leverage, e, eff_lev,
+                        )
                     self._symbol_info[symbol]["leverage"] = eff_lev
             except Exception as e:  # noqa: BLE001
                 self.logger.warning("⚠️ %s 初始化失敗，剔除此標的: %s", symbol, e)
                 self._symbol_info.pop(symbol, None)
                 if symbol in symbols:
                     symbols.remove(symbol)   # 就地移除，orchestrator/bots 共用同一 list
+
+    async def _exchange_leverage(self, symbol: str) -> int | None:
+        """交易所目前該標的的槓桿（僅有持倉時查得到）"""
+        try:
+            for p in await self.api.get_open_positions():
+                if p.get("symbol") == symbol and p.get("leverage"):
+                    return int(p["leverage"])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     async def _set_leverage_with_fallback(self, symbol: str) -> int:
         """設定槓桿；標的不支援設定值時自動退到其允許的最大槓桿。"""
