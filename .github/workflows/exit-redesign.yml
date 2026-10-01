@@ -1,0 +1,77 @@
+# 出場結構重設計掃描（真實 K 線、保真進場訊號）：
+# 分批模式 × 停損模式 × 保本 × L1 後追蹤寬度 × 階梯 × 比例，7 現役標的平行，
+# 完成後跨標的彙整並提交 reports/exit-redesign-*.csv 與 exit-redesign-consensus-*.md
+name: 出場結構重設計掃描
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "回測天數"
+        required: false
+        default: "90"
+      thresholds:
+        description: "進場門檻（逗號分隔）"
+        required: false
+        default: "50,55"
+  push:
+    paths:
+      - "backtest/.exit-redesign-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, BNBUSDT, SUIUSDT, LINKUSDT, TAOUSDT, DOGEUSDT]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+      - name: 下載真實歷史 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days ${{ inputs.days || '90' }}
+      - name: 掃描
+        env:
+          BINANCE_API_KEY: backtest-offline
+          BINANCE_API_SECRET: backtest-offline
+        run: python -m backtest.exit_redesign --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --thresholds "${{ inputs.thresholds || '50,55' }}" --dump-csv reports/exit-redesign-${{ matrix.symbol }}.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exit-redesign-${{ matrix.symbol }}
+          path: reports/exit-redesign-${{ matrix.symbol }}.csv
+          if-no-files-found: error
+
+  collect:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          merge-multiple: true
+      - name: 跨標的彙整並提交
+        run: |
+          mkdir -p reports
+          cp /tmp/artifacts/*.csv reports/ 2>/dev/null || true
+          pip install pyyaml numpy
+          python -m backtest.exit_redesign --consensus --write reports/exit-redesign-consensus-$(date -u +%F).md || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && echo "沒有新報告" && exit 0
+          git commit -m "docs: 出場結構重設計掃描報表（Actions 自動產出，${{ inputs.days || '90' }} 天）"
+          git push
