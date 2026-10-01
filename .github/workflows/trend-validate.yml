@@ -1,0 +1,72 @@
+# 順勢策略驗證（真實 K 線、保真時框切片）：進場 2×2 × 出場 24 組，7 現役標的平行，
+# 完成後跨標的彙整並提交 reports/trend-*.csv 與 trend-consensus-*.md
+name: 順勢策略驗證
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "回測天數"
+        required: false
+        default: "90"
+  push:
+    paths:
+      - "backtest/.trend-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, BNBUSDT, SUIUSDT, LINKUSDT, TAOUSDT, DOGEUSDT]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+      - name: 下載真實歷史 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days ${{ inputs.days || '90' }}
+      - name: 驗證
+        env:
+          BINANCE_API_KEY: backtest-offline
+          BINANCE_API_SECRET: backtest-offline
+        run: python -m backtest.trend_backtest --real --symbol ${{ matrix.symbol }} --days ${{ inputs.days || '90' }} --dump-csv reports/trend-${{ matrix.symbol }}.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trend-${{ matrix.symbol }}
+          path: reports/trend-${{ matrix.symbol }}.csv
+          if-no-files-found: error
+
+  collect:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          merge-multiple: true
+      - name: 跨標的彙整並提交
+        run: |
+          mkdir -p reports
+          cp /tmp/artifacts/*.csv reports/ 2>/dev/null || true
+          pip install pyyaml numpy pandas
+          python -m backtest.trend_backtest --consensus --write reports/trend-consensus-$(date -u +%F).md || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && echo "沒有新報告" && exit 0
+          git commit -m "docs: 順勢策略驗證報表（Actions 自動產出，${{ inputs.days || '90' }} 天）"
+          git push
