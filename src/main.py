@@ -739,6 +739,12 @@ async def main():
     log_cfg = config.get("logging", {})
     setup_logger("cryptotrade", log_cfg.get("level", "INFO"), log_cfg.get("file"))
 
+    # 家用電腦跑真金：程式執行期間阻止 Windows 進入睡眠（睡眠 = 停止管倉）
+    if not config["binance"]["testnet"]:
+        from src.utils.keep_awake import keep_awake
+        if keep_awake():
+            logger.warning("💡 已阻止系統睡眠（關閉此視窗即恢復）；筆電闔蓋仍可能睡眠，請設定闔蓋不動作")
+
     def _mark(phase: str, error: str | None = None, attempts: int = 0):
         state.engine_status = {
             "phase": phase, "error": error,
