@@ -41,8 +41,20 @@ class TestPreflight(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertFalse(next(c for c in r["checks"] if c["name"] == "ack")["ok"])
 
-    def test_hedge_mode_blocks(self):
-        r = asyncio.run(run_preflight(api(dual=True), ["BTCUSDT"], BOT, live_ack=True))
+    def test_hedge_mode_auto_switched(self):
+        a = api(dual=True)
+        a.client.futures_change_position_mode = AsyncMock()
+        a.client.futures_get_position_mode = AsyncMock(side_effect=[
+            {"dualSidePosition": True}, {"dualSidePosition": False}])
+        r = asyncio.run(run_preflight(a, ["BTCUSDT"], BOT, live_ack=True))
+        self.assertTrue(r["ok"])
+        a.client.futures_change_position_mode.assert_called_once_with(dualSidePosition="false")
+        self.assertIn("已自動切成單向", next(c for c in r["checks"] if c["name"] == "position_mode")["detail"])
+
+    def test_hedge_mode_blocks_when_switch_fails(self):
+        a = api(dual=True)
+        a.client.futures_change_position_mode = AsyncMock(side_effect=Exception("-4068 open positions"))
+        r = asyncio.run(run_preflight(a, ["BTCUSDT"], BOT, live_ack=True))
         self.assertFalse(r["ok"])
 
     def test_low_balance_blocks(self):
