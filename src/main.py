@@ -570,6 +570,23 @@ class TradeOrchestrator:
         logger.info("=" * 50)
 
         await self.api.connect()
+        state.testnet = self.config["binance"]["testnet"]
+        if not state.testnet:
+            # 真金：任何硬性檢查失敗就拒絕啟動（main 的重試迴圈會每分鐘重跑，修好即自動啟動）
+            from src.execution.live_preflight import run_preflight
+            futures_cfg = next(
+                (b for b in self.config.get("bots", {}).values()
+                 if b.get("enabled", True) and b.get("mode") == "futures"), {},
+            )
+            pre = await run_preflight(
+                self.api, list(self.symbols), futures_cfg,
+                live_ack=self.config["binance"].get("live_ack", False),
+            )
+            state.live_preflight = pre
+            if not pre["ok"]:
+                failed = [c["detail"] for c in pre["checks"] if c["hard"] and not c["ok"]]
+                raise RuntimeError("真金預檢未通過: " + "；".join(failed))
+            logger.warning("💰 真金模式預檢通過（餘額 %.2f U），開始交易", pre["balance"])
         await self._import_exchange_history()
         await self._load_historical_candles()
 

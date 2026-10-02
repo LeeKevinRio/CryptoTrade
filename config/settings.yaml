@@ -205,6 +205,14 @@ bots:
         - pct: 100
           offset: 0.0
 
+# ── 真金模式覆寫（BINANCE_TESTNET=false 時深度合併到每個啟用的 bot）──
+# 第一週收緊：日虧上限 5% → 3%、同時持倉 3 → 2。跑穩一週後再放回測試網的值。
+# 測試網完全不受影響。另需環境變數 LIVE_TRADING_ACK=I_UNDERSTAND 才會啟動（見 DEPLOY.md）。
+live_overrides:
+  risk:
+    max_daily_loss_pct: 3.0
+    max_concurrent_positions: 2
+
 notification:
   enabled: true
   telegram: true

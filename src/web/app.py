@@ -184,6 +184,9 @@ def create_app(tracker=None) -> FastAPI:
         out = {
             "engine": state.engine_status or {"phase": "unknown", "error": None},
             "testnet": state.testnet,
+            "mode": "testnet" if state.testnet else "live",
+            # 真金預檢（測試網為 null）：哪一項擋住啟動、哪些標的會被跳過
+            "live_preflight": state.live_preflight,
             "symbols": state.symbols,
             "bots": list(state.bots.keys()),
             # 「為什麼沒有交易」：評估次數、可進場次數、實際開倉數與各阻擋原因

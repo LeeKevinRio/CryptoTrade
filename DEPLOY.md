@@ -83,6 +83,30 @@ fly logs            # 看日誌
 與 `scripts/check_edge.py` 皆已扣手續費（交易所匯入者用真實手續費，bot 自記者以名目 × 0.08% 估）。
 上真金門檻：`check_edge` **扣費後** t > 2 且信賴區間下界 > 0，現行配置 100 筆以上。
 
+### 真金上線步驟（2026-10-02 起支援）
+
+真金不是改一個布林就上：啟動時會跑**預檢**，任一硬性項目失敗就拒絕交易並在 `/api/diag` 的
+`live_preflight` 列出原因（main 的重試迴圈每分鐘重跑，修好即自動啟動）。
+
+1. **先處理舊實例**：換掉測試網 API key，確認帳上只有一個引擎在下單。
+2. **建真金 API key**（幣安 → API 管理）：只勾「啟用合約」，**不要勾提幣**，IP 限制填 Render 的
+   Outbound IP（Render 服務頁 → Settings → Outbound IP addresses）。
+3. **幣安合約設定**：持倉模式必須是**單向（One-way）**；程式以 BOTH 下單，雙向模式會被預檢擋下。
+4. **Render 環境變數**（Environment）：
+   ```
+   BINANCE_API_KEY=<真金 key>
+   BINANCE_API_SECRET=<真金 secret>
+   BINANCE_TESTNET=false
+   LIVE_TRADING_ACK=I_UNDERSTAND      # 明確確認；缺這行預檢直接擋
+   ```
+   存檔後 Render 自動重啟。
+5. **Render 加持久化硬碟**（Starter）並把 `DATABASE_URL` 指到掛載路徑，真金紀錄不該靠重啟後從交易所拼。
+6. 打開 `/api/diag`：`mode` 應為 `live`、`live_preflight.ok` 為 `true`；看 `checks` 裡每個標的的
+   全倉／半倉是否達最小單位（500 U 時 BTC 半倉會被跳過，只有強訊號下單；≥ 1000 U 全部正常）。
+
+真金模式自動套用 `settings.yaml` 的 `live_overrides`（日虧上限 3%、同時持倉 2），跑穩一週再放寬。
+儀表板的 `force_trade` 在真金模式永遠被拒絕。
+
 ### 績效紀錄：以交易所為唯一真相來源
 
 bot 的 SQLite 只記「這一台 bot 自己執行」的交易——雲端重新部署、本地/雲端切換、
