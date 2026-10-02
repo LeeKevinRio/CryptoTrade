@@ -68,9 +68,7 @@ def _validate(config: dict):
 
 
 def load_config(config_path: str = "config/settings.yaml") -> dict:
-    # ENV_FILE 讓真金用獨立的 .env.live：真金金鑰永遠不會出現在測試網用的 .env，
-    # 任何沿用 .env 的舊程式／舊視窗都拿不到真金權限。已存在的環境變數優先（不被覆寫）。
-    load_dotenv(os.getenv("ENV_FILE") or ".env")
+    load_dotenv()
 
     cfg_file = Path(config_path)
     if not cfg_file.exists():
