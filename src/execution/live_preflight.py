@@ -56,8 +56,18 @@ async def run_preflight(api, symbols: list[str], bot_cfg: dict, *, live_ack: boo
     try:
         mode = await api.client.futures_get_position_mode()
         dual = bool(mode.get("dualSidePosition"))
-        add("position_mode", not dual,
-            "單向持倉（One-way）" if not dual else "目前是雙向持倉（Hedge）—— 請在幣安合約設定改為單向")
+        if dual:
+            # 使用者在幣安 UI 常找不到這個設定；帳上沒有部位時 API 可直接切換，自己改掉
+            try:
+                await api.client.futures_change_position_mode(dualSidePosition="false")
+                mode = await api.client.futures_get_position_mode()
+                dual = bool(mode.get("dualSidePosition"))
+                detail = "原為雙向持倉，已自動切成單向" if not dual else "切換單向失敗（仍為雙向）"
+            except Exception as e:  # noqa: BLE001
+                detail = f"目前是雙向持倉（Hedge），自動切換失敗: {e} —— 請先平掉所有部位再試，或在幣安合約偏好設定改為單向"
+        else:
+            detail = "單向持倉（One-way）"
+        add("position_mode", not dual, detail)
     except Exception as e:  # noqa: BLE001
         add("position_mode", False, f"查詢持倉模式失敗: {e}")
 
