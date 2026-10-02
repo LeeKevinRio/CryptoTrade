@@ -27,6 +27,8 @@ class Signal:
     # 聚合後的中性訊號保留兩邊原始強度（僅供診斷顯示）
     long_strength: float = 0.0
     short_strength: float = 0.0
+    # 結構停損價（順勢策略帶出；None = 由風控用固定 % 決定）
+    stop_price: float | None = None
 
     @property
     def is_actionable(self) -> bool:

@@ -11,6 +11,25 @@ class ConfigError(Exception):
     pass
 
 
+def _deep_merge(base: dict, override: dict):
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+
+
+def _apply_live_overrides(config: dict):
+    """真金模式的保守覆寫（settings.yaml `live_overrides`）：對每個啟用的 bot 深度合併。
+    第一週把日虧上限與同時持倉收緊，跑穩再放回去；測試網不受影響。"""
+    ov = config.get("live_overrides") or {}
+    if not ov:
+        return
+    for bid, b in config.get("bots", {}).items():
+        if b.get("enabled", True):
+            _deep_merge(b, ov)
+
+
 def _validate(config: dict):
     """簡易但強硬的設定驗證 — 阻擋顯然錯誤的參數"""
     bots = config.get("bots", {})
@@ -69,7 +88,12 @@ def load_config(config_path: str = "config/settings.yaml") -> dict:
         "api_key": api_key,
         "api_secret": api_secret,
         "testnet": os.getenv("BINANCE_TESTNET", "true").lower() == "true",
+        # 真金必須明確確認：BINANCE_TESTNET=false 卻沒設 LIVE_TRADING_ACK=I_UNDERSTAND
+        # → 預檢直接擋下，避免只是改了一個布林就把真錢丟進去
+        "live_ack": os.getenv("LIVE_TRADING_ACK", "") == "I_UNDERSTAND",
     }
+    if not config["binance"]["testnet"]:
+        _apply_live_overrides(config)
     config["telegram"] = {
         "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
         "chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
