@@ -194,6 +194,13 @@ def create_app(tracker=None) -> FastAPI:
             "risk_state": bots_risk,
             # 停損／停利是否真的有在檢查（ts 停在很久以前或 no_price 非空 = 沒在管倉）
             "risk_heartbeat": dict(state.risk_heartbeat),
+            # 行情串流健康度：last_kline_age_s 長時間為 null 或很大 = 沒收到行情，不會評估訊號
+            "ws": (lambda w: None if w is None else {
+                "endpoint": w.endpoint,
+                "last_kline_age_s": (round(__import__("time").time() - w.last_kline_at, 1)
+                                     if w.last_kline_at else None),
+                "reconnects": w.reconnects,
+            })(state.ws_feed_ref),
             # 交易所真實持倉（reconcile 每 30 秒更新）與啟動接管紀錄 ——
             # 對照 /api/bots/*/positions 可看出「交易所有、bot 沒接管」的倉
             "exchange_positions": {
