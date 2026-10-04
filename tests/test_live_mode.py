@@ -95,8 +95,9 @@ class TestLiveOverrides(unittest.TestCase):
         c = self._load("false", "I_UNDERSTAND")
         self.assertFalse(c["binance"]["testnet"])
         self.assertTrue(c["binance"]["live_ack"])
-        self.assertEqual(c["bots"]["futures"]["risk"]["max_daily_loss_pct"], 3.0)
-        self.assertEqual(c["bots"]["futures"]["risk"]["max_concurrent_positions"], 2)
+        self.assertEqual(c["bots"]["futures"]["risk"]["max_daily_loss_pct"], 5.0)
+        self.assertEqual(c["bots"]["futures"]["risk"]["max_concurrent_positions"], 7)
+        self.assertEqual(c["bots"]["futures"]["risk"]["max_position_pct"], 10)
         # 其餘參數不受影響
         self.assertEqual(c["bots"]["futures"]["risk"]["stop_loss_pct"], 5.0)
 
