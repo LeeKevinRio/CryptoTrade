@@ -29,6 +29,9 @@ class SignalAggregator:
         # 高時框趨勢過濾：下跌趨勢擋逆勢多單、上升趨勢擋逆勢空單
         self.trend_cfg = config.get("strategy", {}).get("trend_filter", {})
         self._trend_tf_warned = False
+        # 短線動能過濾（1h EMA 排列）：4h EMA50 斜率看 24h，新一波行情剛發動時反應太慢，
+        # 抄底／摸頂訊號會在剛起漲（剛起跌）時逆勢進場被軋。預設關閉，驗證後才開
+        self.momentum_cfg = config.get("strategy", {}).get("momentum_filter", {})
 
     def _trend_bias(self, candles: dict[str, pd.DataFrame]) -> tuple[int, float]:
         """以高時框 EMA 斜率判定趨勢。回傳 (bias, slope_pct)：
@@ -63,6 +66,24 @@ class SignalAggregator:
             return -1, slope_pct
         return 0, slope_pct
 
+    def _momentum_bias(self, candles: dict[str, pd.DataFrame]) -> int:
+        """1 = 短線上升（收盤 > 快 EMA > 慢 EMA），-1 = 短線下降，0 = 其他／停用／資料不足"""
+        if not self.momentum_cfg.get("enabled", False):
+            return 0
+        df = candles.get(self.momentum_cfg.get("timeframe", "1h"))
+        fast = int(self.momentum_cfg.get("fast", 20))
+        slow = int(self.momentum_cfg.get("slow", 50))
+        if df is None or len(df) < slow + 1:
+            return 0
+        close = float(df["close"].iloc[-1])
+        ef = float(calculate_ema(df, fast).iloc[-1])
+        es = float(calculate_ema(df, slow).iloc[-1])
+        if close > ef > es:
+            return 1
+        if close < ef < es:
+            return -1
+        return 0
+
     def evaluate(
         self,
         symbol: str,
@@ -87,6 +108,19 @@ class SignalAggregator:
             short_signal = Signal(
                 type=SignalType.NEUTRAL, symbol=symbol, strength=0,
                 reasons=[f"趨勢過濾：4h EMA 斜率 {slope:.2f}% 向上，擋逆勢空單"],
+            )
+
+        mom = self._momentum_bias(candles)
+        tf_m = self.momentum_cfg.get("timeframe", "1h")
+        if mom < 0 and long_signal.is_actionable:
+            long_signal = Signal(
+                type=SignalType.NEUTRAL, symbol=symbol, strength=0,
+                reasons=[f"動能過濾：{tf_m} 收盤 < EMA 快 < 慢（短線下跌），擋逆勢多單"],
+            )
+        elif mom > 0 and short_signal.is_actionable:
+            short_signal = Signal(
+                type=SignalType.NEUTRAL, symbol=symbol, strength=0,
+                reasons=[f"動能過濾：{tf_m} 收盤 > EMA 快 > 慢（短線上漲），擋逆勢空單"],
             )
 
         # 衝突檢查：同時出現多空訊號 → 不動作

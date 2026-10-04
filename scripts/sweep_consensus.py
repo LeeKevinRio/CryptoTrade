@@ -45,8 +45,8 @@ def _num(v):
         return v
 
 
-def load(symbol: str, reports: Path) -> dict[tuple, dict]:
-    path = reports / f"sweep-full-{symbol}.csv"
+def load(symbol: str, reports: Path, prefix: str = "sweep-full") -> dict[tuple, dict]:
+    path = reports / f"{prefix}-{symbol}.csv"
     if not path.exists():
         return {}
     out = {}
@@ -82,11 +82,14 @@ def main():
     ap.add_argument("--reports", default="reports")
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument("--write", default=None, help="同時把結果寫成 markdown")
+    ap.add_argument("--prefix", default="sweep-full", help="CSV 檔名前綴（A/B 對照用）")
+    ap.add_argument("--current", default="55,5,1.5,2.5,3,0.4,,0.4",
+                    help="現行組合（門檻,SL,L1,L2,L3,trail,時停秒,無波動），會另外列出")
     args = ap.parse_args()
 
     symbols = args.symbols.split(",") if args.symbols else _active_symbols()
     reports = Path(args.reports)
-    data = {s: load(s, reports) for s in symbols}
+    data = {s: load(s, reports, args.prefix) for s in symbols}
     missing = [s for s, d in data.items() if not d]
     if missing:
         print(f"⚠️  缺少報表：{', '.join(missing)}（略過）")
@@ -113,6 +116,18 @@ def main():
     lines = []
     def out(s=""):
         print(s); lines.append(s)
+
+    cur = tuple(_num(x) for x in args.current.split(","))
+    cur_rows = [data[s].get(cur) for s in symbols]
+    if any(cur_rows):
+        nets = [r["net"] for r in cur_rows if r]
+        trades = sum(r["trades"] for r in cur_rows if r)
+        wavg = sum(r["net"] * r["trades"] for r in cur_rows if r) / max(trades, 1)
+        out(f"【現行組合 {fmt_key(cur)}】淨正 {sum(n > 0 for n in nets)}/{len(symbols)}  "
+            f"最差 {min(nets):+.3f}  加權淨期望 {wavg:+.3f}%  總筆 {trades}")
+        out("    各標的 " + "  ".join(
+            f"{s.replace('USDT', '')} {r['net']:+.2f}/{r['trades']}筆/勝{r['win_rate']:.0f}%" if r else f"{s} n/a"
+            for s, r in zip(symbols, cur_rows)))
 
     out(f"跨標的參數彙整 — {len(symbols)} 標的：{', '.join(symbols)}   組合數 {len(rows)}")
     out(f"判準：淨期望（扣 {EST_FEE}%/筆）> 0 的標的數 → 最差標的淨期望 → 平均")
