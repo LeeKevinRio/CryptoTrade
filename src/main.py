@@ -282,6 +282,8 @@ class TradeBot:
             reason = signal.reasons[0] if signal.reasons else "訊號強度不足"
             if "趨勢過濾" in reason:
                 reason = "趨勢過濾擋下逆勢訊號"
+            elif "動能過濾" in reason:
+                reason = "短線動能擋下逆勢訊號"
             elif "衝突" in reason:
                 reason = "多空訊號衝突"
             else:

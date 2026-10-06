@@ -100,3 +100,36 @@ class TestTrendVeto(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMomentumFilter(unittest.TestCase):
+    """1h 短線動能過濾：剛起漲時擋逆勢空單（4h 斜率尚未反應）"""
+
+    def _agg(self, enabled):
+        from src.strategy.signal_aggregator import SignalAggregator
+        from src.strategy.base_strategy import Signal, SignalType
+        from unittest.mock import MagicMock
+        agg = SignalAggregator({"strategy": {"medium_signal_threshold": 55,
+                                             "momentum_filter": {"enabled": enabled}}})
+        agg.dip_buyer.analyze = MagicMock(return_value=Signal(
+            type=SignalType.NEUTRAL, symbol="X", strength=0))
+        agg.short_seller.analyze = MagicMock(return_value=Signal(
+            type=SignalType.SHORT, symbol="X", strength=60, price=110, min_strength=55))
+        return agg
+
+    def _rising_1h(self):
+        import numpy as np
+        import pandas as pd
+        c = np.linspace(100, 110, 80)
+        return {"1h": pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0})}
+
+    def test_short_blocked_in_short_term_uptrend(self):
+        from src.strategy.base_strategy import SignalType
+        sig = self._agg(True).evaluate("X", self._rising_1h())
+        self.assertEqual(sig.type, SignalType.NEUTRAL)
+        self.assertFalse(sig.is_actionable)
+
+    def test_disabled_keeps_short(self):
+        from src.strategy.base_strategy import SignalType
+        sig = self._agg(False).evaluate("X", self._rising_1h())
+        self.assertEqual(sig.type, SignalType.SHORT)

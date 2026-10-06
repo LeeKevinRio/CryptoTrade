@@ -288,6 +288,7 @@ RANK_KEYS = {
 def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pnl",
               real: bool = False, symbol: str = "BTCUSDT", faithful: bool = True,
               dump_csv: str | None = None, trend_filter: bool | None = None,
+              momentum_filter: bool | None = None,
               thresholds: list[float] | None = None):
     config = load_config()
     bot_cfg = config.get("bots", {}).get(bot_id)
@@ -297,6 +298,9 @@ def run_sweep(bot_id: str, days: int, min_trades: int, top: int, rank: str = "pn
         # A/B 對照用：強制覆寫趨勢過濾開關（不動 settings.yaml）
         bot_cfg.setdefault("strategy", {}).setdefault("trend_filter", {})["enabled"] = trend_filter
         print(f"  趨勢過濾: {'開' if trend_filter else '關'}（CLI 覆寫）", flush=True)
+    if momentum_filter is not None:
+        bot_cfg.setdefault("strategy", {}).setdefault("momentum_filter", {})["enabled"] = momentum_filter
+        print(f"  短線動能過濾: {'開' if momentum_filter else '關'}（CLI 覆寫）", flush=True)
 
     if real:
         import asyncio
@@ -496,6 +500,8 @@ def main():
                     help="把全部合格組合的完整指標寫成 CSV（供跨標的比對）")
     ap.add_argument("--thresholds", default=None,
                     help="同時掃進場門檻，逗號分隔（例 50,60）；預設只用 settings 現值")
+    ap.add_argument("--momentum-filter", default=None, choices=["on", "off"],
+                    help="強制開/關 1h EMA 短線動能過濾（A/B 對照用）")
     ap.add_argument("--trend-filter", default=None, choices=["on", "off"],
                     help="強制開/關高時框趨勢過濾（A/B 對照用，預設依 settings.yaml）")
     args = ap.parse_args()
@@ -505,6 +511,7 @@ def main():
         real=args.real, symbol=args.symbol, faithful=not args.legacy,
         dump_csv=args.dump_csv,
         trend_filter=None if args.trend_filter is None else args.trend_filter == "on",
+        momentum_filter=None if args.momentum_filter is None else args.momentum_filter == "on",
         thresholds=[float(t) for t in args.thresholds.split(",")] if args.thresholds else None,
     )
     source = f"真實歷史K線 {args.symbol}" if args.real else "模擬資料(seed=42)"

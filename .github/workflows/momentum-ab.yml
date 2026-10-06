@@ -1,0 +1,73 @@
+# 短線動能過濾 A/B：同一段 90 天真實 K 線，動能過濾 開 vs 關，7 現役標的平行
+# 產出 reports/mf-{off,on}-full-*.csv 與 reports/momentum-ab-*.md（含現行組合逐標的對照）
+name: 動能過濾 A/B
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backtest/.momentum-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [BTCUSDT, ETHUSDT, BNBUSDT, SUIUSDT, LINKUSDT, TAOUSDT, DOGEUSDT]
+        mf: ["off", "on"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+      - name: 下載真實歷史 K 線
+        run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 90
+      - name: 掃描
+        env:
+          BINANCE_API_KEY: backtest-offline
+          BINANCE_API_SECRET: backtest-offline
+        run: python -m backtest.param_sweep --real --symbol ${{ matrix.symbol }} --days 90 --rank net --min-trades 10 --thresholds 55 --momentum-filter ${{ matrix.mf }} --no-report --dump-csv reports/mf-${{ matrix.mf }}-full-${{ matrix.symbol }}.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mf-${{ matrix.mf }}-${{ matrix.symbol }}
+          path: reports/mf-${{ matrix.mf }}-full-${{ matrix.symbol }}.csv
+          if-no-files-found: error
+
+  collect:
+    needs: sweep
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          merge-multiple: true
+      - name: 彙整並提交
+        run: |
+          mkdir -p reports
+          cp /tmp/artifacts/*.csv reports/ 2>/dev/null || true
+          pip install pyyaml
+          D=$(date -u +%F)
+          { echo "# 動能過濾 A/B $D"; echo; echo "## 關閉（現行）"; echo '```';
+            python -m scripts.sweep_consensus --prefix mf-off-full --top 5 || true; echo '```';
+            echo; echo "## 開啟"; echo '```';
+            python -m scripts.sweep_consensus --prefix mf-on-full --top 5 || true; echo '```'; } > reports/momentum-ab-$D.md
+          cat reports/momentum-ab-$D.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && echo "沒有新報告" && exit 0
+          git commit -m "docs: 動能過濾 A/B 報表（Actions 自動產出）"
+          git push

@@ -216,6 +216,9 @@ live_overrides:
     max_position_pct: 10            # 5 → 10：單筆名目加倍
     max_concurrent_positions: 7     # 2 → 7：等於標的數，即不限制
     max_daily_loss_pct: 5.0         # 3 → 5
+    # 同方向持倉上限（2026-10-05 使用者要求）：大漲時多筆空單一起被軋 → 同一方向最多 3 檔，
+    # 最壞同時停損約 -37 U（原 7 檔約 -87 U）；反方向不受影響
+    max_same_direction_positions: 3
 
 notification:
   enabled: true
