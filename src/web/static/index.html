@@ -27,6 +27,8 @@
         <span class="pill" :class="wsConnected ? 'pill-ok' : 'pill-danger'">
           {{ wsConnected ? '● 已連線' : '○ 斷線' }}
         </span>
+        <a class="pill pill-ok" href="/api/diag" target="_blank" rel="noopener"
+           title="開啟診斷資料（引擎狀態、預檢、行情、持倉）" style="text-decoration:none">🩺 診斷</a>
       </div>
     </header>
 
