@@ -173,7 +173,11 @@ def create_app(tracker=None) -> FastAPI:
             if not b.bot_ref:
                 continue
             cm = b.bot_ref.position_manager.capital_manager
+            sides = [p.side for p in b.bot_ref.position_manager.all_positions.values()]
+            max_same = b.bot_ref.config.get("risk", {}).get("max_same_direction_positions")
             bots_risk[bid] = {
+                "by_direction": f"多 {sides.count('LONG')} / 空 {sides.count('SHORT')}"
+                                + (f"（同方向上限 {max_same}）" if max_same else ""),
                 "daily_trades": f"{cm.daily_trades}/{cm.max_daily_trades}",
                 "open_positions": f"{cm.open_positions}/{cm.max_concurrent}",
                 "consecutive_losses": f"{cm.consecutive_losses}/{cm.max_consecutive_losses}",

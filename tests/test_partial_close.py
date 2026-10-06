@@ -281,3 +281,44 @@ class TestDailyLossGateWithUnknownBalance(unittest.TestCase):
         ok, reason = cm.can_trade(1000.0)
         self.assertFalse(ok)
         self.assertIn("每日最大虧損", reason)
+
+
+class TestSameDirectionCap(unittest.TestCase):
+    """同方向持倉上限：第 4 檔空單被擋、反方向照常"""
+
+    def _ex(self, cap=3):
+        cfg = copy.deepcopy(BASE_CONFIG)
+        cfg["risk"]["max_concurrent_positions"] = 7
+        cfg["risk"]["max_same_direction_positions"] = cap
+        api = MagicMock()
+        api.futures_market_order = AsyncMock(return_value={"orderId": 1, "avgPrice": "100", "executedQty": "1"})
+        api.futures_stop_market = AsyncMock(return_value={})
+        api.futures_limit_order = AsyncMock(return_value={})
+        pm = PositionManager(cfg)
+        ex = OrderExecutor(api=api, position_manager=pm, config=cfg, mode="futures")
+        for s in ("AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT"):
+            ex._symbol_info[s] = {"qty_precision": 3, "price_precision": 2, "min_qty": 0.001}
+        for s in ("AUSDT", "BUSDT", "CUSDT"):
+            pm.open_position(s, "SHORT", 100, 1.0, leverage=5)
+        return ex, api
+
+    def _sig(self, sym, typ):
+        from src.strategy.base_strategy import Signal, SignalType
+        return Signal(type=getattr(SignalType, typ), symbol=sym, strength=70, price=100, min_strength=55)
+
+    def test_fourth_short_blocked(self):
+        ex, api = self._ex()
+        r = asyncio.run(ex.execute_signal(self._sig("DUSDT", "SHORT"), balance=1000))
+        self.assertIsNone(r)
+        api.futures_market_order.assert_not_called()
+
+    def test_long_still_allowed(self):
+        ex, api = self._ex()
+        r = asyncio.run(ex.execute_signal(self._sig("EUSDT", "LONG"), balance=1000))
+        self.assertIsNotNone(r)
+        self.assertEqual(r["side"], "LONG")
+
+    def test_no_cap_configured(self):
+        ex, api = self._ex(cap=None)
+        r = asyncio.run(ex.execute_signal(self._sig("DUSDT", "SHORT"), balance=1000))
+        self.assertIsNotNone(r)

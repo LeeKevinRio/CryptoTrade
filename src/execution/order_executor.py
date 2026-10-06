@@ -166,6 +166,18 @@ class OrderExecutor:
             note_gate(symbol, "該標的已有持倉")
             return None
 
+        # 同方向持倉上限：加密貨幣高度連動，大漲／大跌時同方向的單會一起被打到停損。
+        # 限制的是「同時押同一個方向」的檔數，不影響反方向進場
+        max_same = self.config.get("risk", {}).get("max_same_direction_positions")
+        if max_same:
+            want = "LONG" if signal.type == SignalType.LONG else "SHORT"
+            same = sum(1 for p in self.pm.all_positions.values() if p.side == want)
+            if same >= int(max_same):
+                label = "多單" if want == "LONG" else "空單"
+                self.logger.info("%s 同方向%s已 %d 檔（上限 %d），跳過", symbol, label, same, max_same)
+                note_gate(symbol, f"風控：同方向{label}已達上限 {max_same}")
+                return None
+
         # 用該標的「實際生效」的槓桿計算部位 —— 標的槓桿上限低於設定值時
         # 已自動退階，沿用設定值會高估可開名目
         eff_leverage = self._symbol_info.get(symbol, {}).get("leverage", self.leverage)
