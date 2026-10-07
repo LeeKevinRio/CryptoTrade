@@ -8,7 +8,12 @@ from src.risk.position_manager import PositionManager
 from src.strategy.base_strategy import Signal, SignalType
 from src.indicators.atr import get_current_atr
 from src.utils.logger import setup_logger
-from src.web.state import note_gate
+from src.web.state import note_gate, state as _state
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class OrderExecutor:
@@ -253,15 +258,8 @@ class OrderExecutor:
                 stop_price = self.pm.sl_manager.get_stop_price(symbol)
                 if stop_price:
                     close_side = "SELL" if pos_side == "LONG" else "BUY"
-                    try:
-                        # closePosition：部分停利成交後仍精確平掉剩餘倉位
-                        await self.api.futures_stop_market(
-                            symbol=symbol, side=close_side,
-                            stop_price=self._round_price(symbol, stop_price),
-                            close_position=True,
-                        )
-                    except Exception as e:
-                        self.logger.warning("停損單掛出失敗: %s", e)
+                    # closePosition：部分停利成交後仍精確平掉剩餘倉位
+                    await self._place_stop(symbol, close_side, stop_price)
 
                 # maker 停利階梯：reduce-only + post-only 限價單掛在交易所，
                 # 成交吃 maker 費率（taker 一半以下），由 reconcile 對帳入帳
@@ -308,23 +306,23 @@ class OrderExecutor:
             self.logger.warning("%s 查詢掛單失敗，略過補掛保護單: %s", symbol, e)
             return out
         types = {str(o.get("type", "")).upper() for o in open_orders}
+        # 正式站條件單在 Algo Order API，舊的 openOrders 看不到 → 一併查
+        try:
+            algo_orders = await self.api.get_open_algo_orders(symbol)
+        except Exception:  # noqa: BLE001 — 測試網／舊帳戶可能沒有此端點
+            algo_orders = []
+        for o in algo_orders:
+            types.add(str(o.get("orderType") or o.get("type") or "").upper())
         close_side = "SELL" if pos_side == "LONG" else "BUY"
 
         if "STOP_MARKET" in types:
             out["stop"] = "exists"
+            _state.protection[symbol] = {"stop": "exists", "route": "algo" if algo_orders else "legacy",
+                                         "error": None, "ts": _now_iso()}
         else:
             stop_price = self.pm.sl_manager.get_stop_price(symbol)
             if stop_price:
-                try:
-                    await self.api.futures_stop_market(
-                        symbol=symbol, side=close_side,
-                        stop_price=self._round_price(symbol, stop_price),
-                        close_position=True,
-                    )
-                    out["stop"] = "placed"
-                except Exception as e:
-                    out["stop"] = "failed"
-                    self.logger.warning("%s 接管倉補掛停損失敗（軟體停損備援）: %s", symbol, e)
+                out["stop"] = "placed" if await self._place_stop(symbol, close_side, stop_price) else "failed"
 
         if self.config.get("risk", {}).get("use_maker_tp", False):
             has_tp = any(
@@ -340,20 +338,49 @@ class OrderExecutor:
                 out["tp"] = "placed"
         return out
 
+    async def _place_stop(self, symbol: str, close_side: str, stop_price: float) -> bool:
+        """掛交易所端停損（closePosition），結果寫入 state.protection 供 /api/diag 顯示。
+        失敗不拋錯：引擎運作中仍有軟體停損，但離線期間這個倉位就沒有任何停損。"""
+        try:
+            order = await self.api.futures_stop_market(
+                symbol=symbol, side=close_side,
+                stop_price=self._round_price(symbol, stop_price),
+                close_position=True,
+            )
+            _state.protection[symbol] = {
+                "stop": "placed", "route": (order or {}).get("_route", "legacy"),
+                "price": self._round_price(symbol, stop_price), "error": None, "ts": _now_iso(),
+            }
+            return True
+        except Exception as e:  # noqa: BLE001
+            _state.protection[symbol] = {
+                "stop": "FAILED", "route": None, "price": self._round_price(symbol, stop_price),
+                "error": str(e)[:300], "ts": _now_iso(),
+            }
+            self.logger.error("❌ %s 交易所端停損單掛出失敗（引擎離線時此倉位無停損）: %s", symbol, e)
+            return False
+
     async def _place_tp_ladder(self, symbol: str, pos_side: str,
                                entry_price: float, quantity: float):
         """把三階停利掛成 reduce-only + post-only(GTX) 限價單（maker 費率）"""
         tp_cfg = self.config.get("risk", {}).get("take_profit", {})
         close_side = "SELL" if pos_side == "LONG" else "BUY"
         sign = 1 if pos_side == "LONG" else -1
-        for i in (1, 2, 3):
+        levels = [i for i in (1, 2, 3)
+                  if tp_cfg.get(f"level_{i}_pct") and tp_cfg.get(f"level_{i}_close_pct")]
+        placed = 0.0
+        for n, i in enumerate(levels):
             pct = tp_cfg.get(f"level_{i}_pct")
             close_pct = tp_cfg.get(f"level_{i}_close_pct")
-            if not pct or not close_pct:
-                continue
-            qty = self._round_qty(symbol, quantity * close_pct / 100)
+            if n == len(levels) - 1:
+                # 最後一階吃掉所有剩餘量：各階分別無條件捨去會留下 1 單位殘倉
+                # （線上 DOGE 2926 顆三階成交後剩 1 顆，佔掉一個持倉名額）
+                qty = self._round_qty(symbol, quantity - placed)
+            else:
+                qty = self._round_qty(symbol, quantity * close_pct / 100)
             if qty <= 0:
                 continue
+            placed += qty
             price = self._round_price(symbol, entry_price * (1 + sign * pct / 100))
             try:
                 await self.api.futures_limit_order(
