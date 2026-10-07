@@ -198,6 +198,8 @@ def create_app(tracker=None) -> FastAPI:
             "risk_state": bots_risk,
             # 停損／停利是否真的有在檢查（ts 停在很久以前或 no_price 非空 = 沒在管倉）
             "risk_heartbeat": dict(state.risk_heartbeat),
+            # 交易所端停損單掛單結果（每個標的最近一次）：stop=FAILED 表示引擎離線時該倉位沒有停損
+            "protection": dict(state.protection),
             # 行情串流健康度：last_kline_age_s 長時間為 null 或很大 = 沒收到行情，不會評估訊號
             "ws": (lambda w: None if w is None else {
                 "endpoint": w.endpoint,

@@ -215,6 +215,12 @@ class BinanceAPI:
         logger.info("限價單掛出: %s %s price=%s qty=%s tif=%s", symbol, side, price, quantity, time_in_force)
         return order
 
+    @staticmethod
+    def _needs_algo(exc: Exception) -> bool:
+        """幣安正式站已把條件單（STOP_MARKET 等）移到 Algo Order API；
+        舊端點回 -4120「Order type not supported… use the Algo Order API endpoints」"""
+        return getattr(exc, "code", None) == -4120 or "algo" in str(exc).lower()
+
     @with_retry()
     async def futures_stop_market(
         self, symbol: str, side: str, stop_price: float,
@@ -232,10 +238,42 @@ class BinanceAPI:
             params["closePosition"] = "true"
         else:
             params["quantity"] = quantity
-        order = await self.client.futures_create_order(**params)
-        logger.info("停損市價單: %s %s stop=%s %s", symbol, side, stop_price,
+        try:
+            order = await self.client.futures_create_order(**params)
+            route = "legacy"
+        except BinanceAPIException as e:
+            if not self._needs_algo(e):
+                raise
+            # 2026-10-07：真金 SUI 在引擎離線期間跌破停損線 2% 仍未被交易所平倉 ——
+            # 舊端點不再接受條件單，掛單失敗只被記成 warning。改走 Algo Order API
+            algo: dict[str, Any] = dict(
+                algoType="CONDITIONAL", symbol=symbol, side=side,
+                type="STOP_MARKET", triggerPrice=str(stop_price),
+            )
+            if close_position:
+                algo["closePosition"] = "true"
+            else:
+                algo["quantity"] = quantity
+            logger.warning("%s 舊端點不接受停損條件單（%s），改用 Algo Order API", symbol, e)
+            order = await self.client._request_futures_api("post", "algoOrder", True, data=algo)
+            route = "algo"
+        order = dict(order or {})
+        order["_route"] = route
+        logger.info("停損市價單(%s): %s %s stop=%s %s", route, symbol, side, stop_price,
                     "closePosition" if close_position else f"qty={quantity}")
         return order
+
+    async def get_open_algo_orders(self, symbol: str) -> list[dict]:
+        """Algo Order API 的未觸發條件單（舊端點的 openOrders 看不到這些）"""
+        res = await self.client._request_futures_api(
+            "get", "openAlgoOrders", True, data={"symbol": symbol})
+        if isinstance(res, list):
+            return res
+        if isinstance(res, dict):
+            for v in res.values():
+                if isinstance(v, list):
+                    return v
+        return []
 
     async def futures_take_profit_market(
         self, symbol: str, side: str, quantity: float, stop_price: float
@@ -252,6 +290,12 @@ class BinanceAPI:
 
     async def cancel_all_orders(self, symbol: str):
         await self.client.futures_cancel_all_open_orders(symbol=symbol)
+        # Algo 條件單不會被上面那支取消；殘留的 closePosition 停損會在之後誤平同標的的新倉
+        try:
+            await self.client._request_futures_api(
+                "delete", "algoOpenOrders", True, data={"symbol": symbol})
+        except Exception as e:  # noqa: BLE001 — 沒有 algo 單或端點不支援都無妨
+            logger.debug("取消 %s algo 條件單: %s", symbol, e)
         logger.info("已取消 %s 所有掛單", symbol)
 
     @with_retry()

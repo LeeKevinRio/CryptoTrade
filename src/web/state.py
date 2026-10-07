@@ -44,6 +44,9 @@ class GlobalState:
         # 每個標的最近一次評估的多／空原始強度，讓「未達門檻」看得出差多少
         "by_symbol": {},
     })
+    # 每個標的最近一次「交易所端停損單」掛單結果 —— 掛不上去時倉位只剩程式在保護，
+    # 引擎一離線（換 IP、關機）就完全沒有停損。{symbol: {"stop": ..., "route": ..., "error": ..., "ts": ...}}
+    protection: dict[str, dict] = field(default_factory=dict)
     # 真金預檢結果（測試網為 None）：{"ok": bool, "balance": float, "checks": [...]}
     live_preflight: dict | None = None
     # 啟動接管紀錄 —— 回答「交易所有倉，為什麼 bot 沒接管」：
