@@ -56,6 +56,16 @@ def _validate(config: dict):
         sl = risk.get("stop_loss_pct", 2.0)
         if sl <= 0 or sl > 50:
             raise ConfigError(f"bot {bid} stop_loss_pct 不合理: {sl}")
+        # 逐倉強平線約在 100/槓桿 − 維持保證金(~0.5%) 處；必須在最寬停損之外，
+        # 否則每筆虧損單都會先被強平（賠光保證金＋強平費）而非停損
+        if mode == "futures" and str(b.get("margin_type", "")).upper() == "ISOLATED":
+            widest = max(sl, float(risk.get("max_stop_pct", sl)))
+            liq = 100.0 / lev - 0.5
+            if liq <= widest + 1.0:
+                raise ConfigError(
+                    f"bot {bid} 槓桿 {lev}x 的逐倉強平線約 -{liq:.1f}%，"
+                    f"不在停損 -{widest:.1f}% 之外（需至少多 1%）—— 會先強平再停損，請降低槓桿"
+                )
         max_loss = risk.get("max_daily_loss_pct", 3.0)
         if max_loss <= 0 or max_loss > 100:
             raise ConfigError(f"bot {bid} max_daily_loss_pct 不合理: {max_loss}")
