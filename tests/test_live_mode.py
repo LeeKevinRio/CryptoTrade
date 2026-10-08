@@ -98,9 +98,31 @@ class TestLiveOverrides(unittest.TestCase):
         self.assertEqual(c["bots"]["futures"]["risk"]["max_daily_loss_pct"], 5.0)
         self.assertEqual(c["bots"]["futures"]["risk"]["max_concurrent_positions"], 7)
         self.assertEqual(c["bots"]["futures"]["risk"]["max_position_pct"], 10)
-        # 其餘參數不受影響
+        self.assertEqual(c["bots"]["futures"]["leverage"], 10)
         self.assertEqual(c["bots"]["futures"]["risk"]["stop_loss_pct"], 5.0)
+
+    def test_testnet_leverage_unchanged(self):
+        self.assertEqual(self._load("true")["bots"]["futures"]["leverage"], 5)
 
     def test_live_without_ack(self):
         c = self._load("false")
         self.assertFalse(c["binance"]["live_ack"])
+
+
+class TestLiquidationGuard(unittest.TestCase):
+    def _cfg(self, lev):
+        return {"trading": {"symbols": ["BTCUSDT"]},
+                "bots": {"futures": {"enabled": True, "mode": "futures", "leverage": lev,
+                                     "margin_type": "ISOLATED",
+                                     "risk": {"max_position_pct": 10, "stop_loss_pct": 5.0,
+                                              "max_stop_pct": 6.0, "max_daily_loss_pct": 5.0}}}}
+
+    def test_10x_allowed(self):
+        from src.utils.config import _validate
+        _validate(self._cfg(10))
+
+    def test_20x_rejected_liquidation_before_stop(self):
+        from src.utils.config import _validate, ConfigError
+        with self.assertRaises(ConfigError) as cm:
+            _validate(self._cfg(20))
+        self.assertIn("強平", str(cm.exception))
