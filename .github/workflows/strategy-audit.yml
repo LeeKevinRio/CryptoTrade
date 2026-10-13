@@ -1,0 +1,56 @@
+# 策略體檢：實盤勝率遠低於回測時用
+#   1) live_replay  — 現行設定重播最近 14 天，對照實盤成績（分辨「策略失效」vs「執行不一致」）
+#   2) walk_forward — 一年資料、訓練 90 天/測試 30 天的樣本外驗證（含現行固定參數版本）
+# 產出 reports/strategy-audit-YYYY-MM-DD.md
+name: 策略體檢
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backtest/.audit-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      BINANCE_API_KEY: backtest-offline
+      BINANCE_API_SECRET: backtest-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安裝依賴
+        run: pip install -r requirements.txt
+      - name: 實盤期間重播（14 天）
+        run: python -m backtest.live_replay --window 14 --out /tmp/replay.md
+      - name: 下載一年 K 線
+        run: |
+          for s in $(python -c "from src.utils.config import load_config;print(' '.join(load_config()['trading']['symbols']))"); do
+            python -m backtest.fetch_klines --symbol $s --interval 5m --days 365
+          done
+      - name: Walk-forward（每折重選參數）
+        run: python -m backtest.walk_forward --days 365 --train 90 --test 30 --min-trades 15 | tee /tmp/wf.txt
+      - name: Walk-forward（現行固定參數）
+        run: python -m backtest.walk_forward --days 365 --train 90 --test 30 --fixed | tee /tmp/wf-fixed.txt
+      - name: 提交報告
+        if: always()
+        run: |
+          D=$(date -u +%F)
+          mkdir -p reports
+          { cat /tmp/replay.md 2>/dev/null || echo "(重播失敗)"; echo;
+            echo "# Walk-forward 樣本外（每折重選參數）"; echo '```'; cat /tmp/wf.txt 2>/dev/null; echo '```'; echo;
+            echo "# Walk-forward 樣本外（現行固定參數）"; echo '```'; cat /tmp/wf-fixed.txt 2>/dev/null; echo '```'; } > reports/strategy-audit-$D.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: 策略體檢報告（Actions 自動產出）"
+          git push
