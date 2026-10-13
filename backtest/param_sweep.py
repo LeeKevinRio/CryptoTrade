@@ -131,6 +131,7 @@ def fast_backtest(
     closes: np.ndarray, highs: np.ndarray, lows: np.ndarray,
     sides: np.ndarray, params: dict, trail_activation: float, warmup: int = 50,
     bar_seconds: int = 300, close_pcts: tuple = (40, 35, 25),
+    trades_out: list | None = None,
 ) -> list[float]:
     """純出場模擬 — 給定預算好的進場點，套一組出場參數，回傳每筆交易的 pnl%
     （以整筆部位為 100% 的加權實現損益，未扣手續費）。
@@ -216,6 +217,8 @@ def fast_backtest(
 
             if reason is not None:
                 pnls.append(round(realized, 3))
+                if trades_out is not None:   # 逐筆明細（live_replay 對照實盤用）
+                    trades_out.append((i, j, int(side), round(realized, 3), reason))
                 i = j + 1
                 exited = True
                 break

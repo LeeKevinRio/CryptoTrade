@@ -38,13 +38,14 @@ FEE = 0.08          # % 名目，來回
 # 每折候選數少不是妥協：候選越多，訓練期「最佳」越可能是雜訊，
 # 反而讓每一折都在過擬合。完整 1920 組留給單期掃描做探索用。
 WF_GRID = {
-    "stop_loss_pct":  [2.0, 3.0, 4.0],
+    # 含現行實盤組合（SL5 / 1.5-2.5-3 / trail 0.4 / 無時間停損），讓它跟鄰近組公平競爭
+    "stop_loss_pct":  [3.0, 4.0, 5.0],
     "level_1_pct":    [1.0, 1.5],
     "level_2_pct":    [2.5],
     "level_3_pct":    [3.0],
     "trail_callback": [0.4, 0.8],
-    "time_stop_seconds": [1200, 2400, 7200, None],
-    "time_stop_no_movement_pct": [0.2, 0.4],
+    "time_stop_seconds": [2400, 7200, None],
+    "time_stop_no_movement_pct": [0.4],
 }
 
 SIDES_CACHE = Path("data/sides")
@@ -145,7 +146,7 @@ def run_symbol(sym: str, df, sides, train_bars: int, test_bars: int,
     return folds
 
 
-def report(folds: list[Fold]):
+def report(folds: list[Fold], dates: dict | None = None):
     all_test = np.array([p for f in folds for p in f.test_pnls])
     train_exp = np.array([f.train_expectancy for f in folds])
 
@@ -184,6 +185,18 @@ def report(folds: list[Fold]):
         print("  ❌ 樣本外未證實 edge —— 訓練期的優勢無法延續到未見資料")
     print("=" * 72)
 
+    # 每一折（約一個月）的樣本外表現：看虧損是集中在少數月份，還是持續失血
+    if dates:
+        print("\n  各折樣本外（測試期起日）:")
+        for f in folds:
+            p = np.array(f.test_pnls)
+            d = dates[f.symbol][f.train_end] if f.train_end < len(dates[f.symbol]) else "?"
+            wr = f"{np.mean(p > 0)*100:5.1f}%" if len(p) else "  -  "
+            print(f"    {f.symbol:<10} {d:%Y-%m-%d}  n={len(p):>3}  勝率 {wr}  "
+                  f"累計 {p.sum() if len(p) else 0:+6.2f}%  "
+                  f"參數 SL{f.chosen['stop_loss_pct']} L1 {f.chosen['level_1_pct']} "
+                  f"cb{f.chosen['trail_callback']} ts{f.chosen['time_stop_seconds']}")
+
     # 每個標的的樣本外表現，檢查是否只靠少數標的
     print("\n  各標的樣本外:")
     for sym in sorted({f.symbol for f in folds}):
@@ -194,11 +207,13 @@ def report(folds: list[Fold]):
 
 def main():
     ap = argparse.ArgumentParser(description="Walk-forward 驗證")
-    ap.add_argument("--symbols", default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT")
+    ap.add_argument("--symbols", default=None, help="預設讀 settings.yaml trading.symbols")
     ap.add_argument("--days", type=int, default=730)
     ap.add_argument("--train", type=int, default=90, help="訓練視窗天數")
     ap.add_argument("--test", type=int, default=30, help="測試視窗天數")
     ap.add_argument("--min-trades", type=int, default=20, help="訓練視窗最少交易數")
+    ap.add_argument("--fixed", action="store_true",
+                    help="不做參數選擇，每個測試窗都直接套現行 settings.yaml 參數")
     args = ap.parse_args()
 
     try:
@@ -209,7 +224,12 @@ def main():
 
     cfg = load_config()
     strategy = cfg["bots"]["futures"]["strategy"]
-    combos = _combos()
+    if args.fixed:
+        from backtest.live_replay import current_params
+        combos = [current_params(cfg["bots"]["futures"])[0]]
+        args.min_trades = 0
+    else:
+        combos = _combos()
     bars_per_day = 288
     train_bars, test_bars = args.train * bars_per_day, args.test * bars_per_day
 
@@ -219,17 +239,20 @@ def main():
           f"| 情緒回放 {'有' if replay else '無'}")
 
     folds: list[Fold] = []
-    syms = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    syms = ([s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+            if args.symbols else list(cfg["trading"]["symbols"]))
+    dates = {}
     for sym in syms:
         df = asyncio.run(get_klines_df(sym, "5m", args.days))
         print(f"  {sym}: {len(df):,} 根，計算訊號中...", flush=True)
         sides = _cached_sides(sym, df, strategy, replay)
+        dates[sym] = df.index
         f = run_symbol(sym, df, sides, train_bars, test_bars, combos, args.min_trades)
         folds += f
         print(f"    → {len(f)} folds，樣本外 {sum(len(x.test_pnls) for x in f)} 筆",
               flush=True)
 
-    report(folds)
+    report(folds, dates)
 
 
 if __name__ == "__main__":
