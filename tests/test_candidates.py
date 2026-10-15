@@ -94,8 +94,8 @@ class TestWalkForward(unittest.TestCase):
         def fake_sim(df, sides, stop_atr, trail_atr, atr=None, **_):
             # 參數 A：唯一的大賺交易「跨越」訓練窗終點；參數 B：小賺且完全在窗內
             if stop_atr == 1.5:
-                return [(10, 30, 1, 50.0, -1.0), (35, 39, 1, -1.0, -1.0)]
-            return [(10, 12, 1, 0.5, -0.1), (35, 37, 1, 0.5, -0.1)]
+                return [(10, 30, 1, 50.0, -1.0, 1.0), (35, 39, 1, -1.0, -1.0, 1.0)]
+            return [(10, 12, 1, 0.5, -0.1, 1.0), (35, 37, 1, 0.5, -0.1, 1.0)]
 
         cd.simulate = fake_sim
         try:
@@ -108,7 +108,21 @@ class TestWalkForward(unittest.TestCase):
         self.assertTrue(all(t.pnl_pct == 0.5 for t in trades), [t.pnl_pct for t in trades])
 
     def test_total_trials(self):
-        self.assertEqual(cd.total_trials(), 12 + 12 + 8)
+        self.assertEqual(cd.total_trials(), 2 * (12 + 12 + 8))   # 加入趨勢過濾版後照實累計
+
+    def test_trend_filter_never_trades_against_trend(self):
+        df = generate_realistic_data(days=120, interval_minutes=60)
+        trend = cd.trend_direction(df)
+        for fam in ("donchian_t", "ema_cross_t", "squeeze_t"):
+            s = cd.SIGNALS[fam](df, **cd.combos(fam)[0])
+            nz = s != 0
+            np.testing.assert_array_equal(s[nz], trend[nz], err_msg=fam)
+
+    def test_risk_pct_is_initial_stop_distance(self):
+        rows = [(100, 100, 100, 100), (100, 100, 97, 99)]
+        t = cd.simulate(_df(rows), np.array([1, 0], dtype=np.int8), stop_atr=2.0,
+                        trail_atr=3.0, atr=np.full(2, 1.0))
+        self.assertAlmostEqual(t[0][5], 2.0)       # 2 × ATR 1 ÷ 100
 
 
 if __name__ == "__main__":

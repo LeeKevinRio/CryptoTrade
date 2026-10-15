@@ -27,6 +27,11 @@ class Trade:
     period: str        # 例如測試窗起始月 "2026-04"，用來看是否只靠少數月份
     pnl_pct: float     # 已扣手續費，以名目為 100%
     mae_pct: float | None = None   # 持倉期間最大逆向波動（≤0）；高槓桿強平判定用
+    risk_pct: float | None = None  # 進場時初始停損距離（%）；以 R 倍數評估與風險定倉用
+
+    def r(self, extra_cost_pct: float = 0.0) -> float:
+        """R 倍數 = 損益 ÷ 初始停損距離（-1R = 剛好打到停損）"""
+        return (self.pnl_pct - extra_cost_pct) / self.risk_pct
 
 
 @dataclass
@@ -71,9 +76,16 @@ def _t_stat(p: np.ndarray) -> float:
 
 
 def gate(trades: list[Trade], n_trials: int = 1, c: Criteria | None = None,
-         seed: int = 0) -> GateResult:
+         seed: int = 0, unit: str = "pct") -> GateResult:
+    """unit="pct" 以名目損益 % 檢定；unit="r" 以 R 倍數檢定（風險定倉的策略該用這個：
+    每筆虧損固定為帳戶的同一比例，高波動標的不會因名目 % 大而主宰統計）"""
     c = c or Criteria()
-    p = np.array([t.pnl_pct for t in trades], dtype=float)
+    use_r = unit == "r"
+    if use_r and any(t.risk_pct is None or t.risk_pct <= 0 for t in trades):
+        raise ValueError("unit='r' 需要每筆交易都有 risk_pct")
+    val = (lambda t: t.r()) if use_r else (lambda t: t.pnl_pct)
+    u = "R" if use_r else "%"
+    p = np.array([val(t) for t in trades], dtype=float)
     checks = []
     n = len(p)
 
@@ -90,15 +102,16 @@ def gate(trades: list[Trade], n_trials: int = 1, c: Criteria | None = None,
     rng = np.random.default_rng(seed)
     boot = p[rng.integers(0, n, size=(c.n_boot, n))].mean(axis=1)
     lo, hi = np.percentile(boot, [2.5, 97.5])
-    checks.append(("信賴區間", lo > 0, f"每筆期望 95% CI [{lo:+.4f}%, {hi:+.4f}%]（下限需 > 0）"))
+    checks.append(("信賴區間", lo > 0, f"每筆期望 95% CI [{lo:+.4f}{u}, {hi:+.4f}{u}]（下限需 > 0）"))
 
-    stressed = mean - c.slippage_pct
+    stressed = (float(np.mean([t.r(c.slippage_pct) for t in trades])) if use_r
+                else mean - c.slippage_pct)
     checks.append(("成本壓力", stressed > 0,
-                   f"每筆再扣 {c.slippage_pct}% 後期望 {stressed:+.4f}%（需 > 0）"))
+                   f"每筆再扣 {c.slippage_pct}% 後期望 {stressed:+.4f}{u}（需 > 0）"))
 
     by_period: dict[str, float] = {}
     for tr in trades:
-        by_period[tr.period] = by_period.get(tr.period, 0.0) + tr.pnl_pct
+        by_period[tr.period] = by_period.get(tr.period, 0.0) + val(tr)
     pos_share = np.mean([v > 0 for v in by_period.values()]) if by_period else 0.0
     checks.append(("期間穩定", pos_share >= c.min_positive_period_share,
                    f"{pos_share*100:.0f}% 的期間獲利（{len(by_period)} 期，需 ≥ "
@@ -106,18 +119,18 @@ def gate(trades: list[Trade], n_trials: int = 1, c: Criteria | None = None,
 
     by_sym: dict[str, float] = {}
     for tr in trades:
-        by_sym[tr.symbol] = by_sym.get(tr.symbol, 0.0) + tr.pnl_pct
+        by_sym[tr.symbol] = by_sym.get(tr.symbol, 0.0) + val(tr)
     best = max(by_sym, key=by_sym.get)
     rest = sum(v for k, v in by_sym.items() if k != best)
     checks.append(("不靠單一標的", rest > 0,
-                   f"拿掉最賺的 {best} 後其餘合計 {rest:+.1f}%（需 > 0）"))
+                   f"拿掉最賺的 {best} 後其餘合計 {rest:+.1f}{u}（需 > 0）"))
 
     # 依期間排序後切兩半（輸入常是「逐標的」排列，直接切會變成比標的而非比時間）
-    chrono = np.array([t.pnl_pct for t in sorted(trades, key=lambda x: x.period)])
+    chrono = np.array([val(t) for t in sorted(trades, key=lambda x: x.period)])
     half = n // 2
     first, second = float(chrono[:half].sum()), float(chrono[half:].sum())
     checks.append(("前後半一致", first > 0 and second > 0,
-                   f"前半 {first:+.1f}% / 後半 {second:+.1f}%（兩段都需 > 0）"))
+                   f"前半 {first:+.1f}{u} / 後半 {second:+.1f}{u}（兩段都需 > 0）"))
 
     stats = {"n": n, "mean": mean, "t": t, "t_need": t_need, "ci": (float(lo), float(hi)),
              "win_rate": float(np.mean(p > 0))}
@@ -203,6 +216,61 @@ def monte_carlo(pnls_pct, leverage: float, position_pct: float, n_trades: int = 
     )
 
 
+def monte_carlo_risk(trades: list[Trade], risk_per_trade_pct: float, leverage: float = 10.0,
+                     n_trades: int = 300, n_paths: int = 5000, block: int = 5,
+                     ruin_level: float = 0.5, seed: int = 0) -> MCResult:
+    """風險定倉：每筆名目 = 帳戶 × 風險% ÷ 停損距離% → 打到停損恰好賠帳戶的風險%。
+
+    交易所槓桿只決定保證金與強平線：保證金 = 名目 ÷ 槓桿；持倉中途逆向 ≥ 強平距離
+    （跳空穿過停損）→ 該筆保證金歸零。名目超過「帳戶 × 槓桿」時按比例縮小（下不了那麼大）。
+    """
+    if not trades:
+        raise ValueError("沒有交易可模擬")
+    if any(t.risk_pct is None or t.risk_pct <= 0 for t in trades):
+        raise ValueError("風險定倉需要每筆交易都有 risk_pct")
+    risk = risk_per_trade_pct / 100.0
+    stop = np.array([t.risk_pct for t in trades]) / 100.0
+    pnl = np.array([t.pnl_pct for t in trades]) / 100.0
+    notional = np.minimum(risk / stop, leverage)          # 占權益的倍數
+    margin = notional / leverage
+    liq = liquidation_distance(leverage) / 100.0
+    maes = np.array([t.mae_pct if t.mae_pct is not None else 0.0 for t in trades]) / 100.0
+    liquidated = -maes >= liq
+    per_trade = np.where(liquidated, -margin, notional * pnl)
+
+    rng = np.random.default_rng(seed)
+    n_blocks = -(-n_trades // block)
+    starts = rng.integers(0, max(1, len(pnl) - block + 1), size=(n_paths, n_blocks))
+    idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(n_paths, -1)[:, :n_trades]
+    idx = np.minimum(idx, len(pnl) - 1)
+    equity = np.maximum(np.cumprod(1.0 + per_trade[idx], axis=1), 0.0)
+    peak = np.maximum.accumulate(np.concatenate([np.ones((n_paths, 1)), equity], axis=1), axis=1)[:, 1:]
+    final = equity[:, -1]
+    return MCResult(
+        leverage=leverage, position_pct=risk_per_trade_pct, n_trades=n_trades,
+        ruin_prob=float(np.mean(equity.min(axis=1) <= ruin_level)),
+        bust_prob=float(np.mean(equity.min(axis=1) <= 0.05)),
+        median_final=float(np.median(final)),
+        p05_final=float(np.percentile(final, 5)),
+        p95_final=float(np.percentile(final, 95)),
+        median_max_dd=float(np.median((1.0 - equity / peak).max(axis=1))),
+        liquidated_share=float(liquidated.mean()),
+    )
+
+
+def risk_table(trades: list[Trade], risks=(0.5, 1, 2, 3, 5), leverage: float = 10.0,
+               n_trades: int = 300, start_balance: float = 500.0) -> str:
+    med_stop = float(np.median([t.risk_pct for t in trades]))
+    lines = [f"  風險定倉蒙地卡羅（{n_trades} 筆，起始 {start_balance:.0f} U，交易所 {leverage:.0f}x；"
+             f"停損距離中位 {med_stop:.2f}%）"]
+    for r in risks:
+        m = monte_carlo_risk(trades, r, leverage, n_trades)
+        lines.append(f"    每筆風險 {r:>4}%  爆倉(-50%) {m.ruin_prob*100:5.1f}%  歸零 {m.bust_prob*100:5.1f}%  "
+                     f"期末中位 {m.median_final*start_balance:8.1f}  [5%: {m.p05_final*start_balance:7.1f}, "
+                     f"95%: {m.p95_final*start_balance:8.1f}]  回撤中位 {m.median_max_dd*100:4.1f}%")
+    return "\n".join(lines)
+
+
 def leverage_table(pnls_pct, position_pct: float, leverages=(3, 5, 10, 20, 27),
                    n_trades: int = 300, start_balance: float = 500.0, mae_pct=None) -> str:
     lines = [f"  槓桿蒙地卡羅（{n_trades} 筆 ≈ 實盤數個月，起始 {start_balance:.0f} U，"
@@ -216,16 +284,18 @@ def leverage_table(pnls_pct, position_pct: float, leverages=(3, 5, 10, 20, 27),
 def write_trades_csv(path: str, trades: list[Trade]):
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["symbol", "period", "pnl_pct", "mae_pct"])
+        w.writerow(["symbol", "period", "pnl_pct", "mae_pct", "risk_pct"])
         for t in trades:
             w.writerow([t.symbol, t.period, f"{t.pnl_pct:.4f}",
-                        "" if t.mae_pct is None else f"{t.mae_pct:.4f}"])
+                        "" if t.mae_pct is None else f"{t.mae_pct:.4f}",
+                        "" if t.risk_pct is None else f"{t.risk_pct:.4f}"])
 
 
 def read_trades_csv(path: str) -> list[Trade]:
     with open(path, encoding="utf-8") as f:
         return [Trade(r["symbol"], r["period"], float(r["pnl_pct"]),
-                      float(r["mae_pct"]) if r.get("mae_pct") else None)
+                      float(r["mae_pct"]) if r.get("mae_pct") else None,
+                      float(r["risk_pct"]) if r.get("risk_pct") else None)
                 for r in csv.DictReader(f)]
 
 
@@ -236,6 +306,8 @@ def main():
     ap.add_argument("--position-pct", type=float, default=10.0)
     ap.add_argument("--leverage", type=float, default=10.0)
     ap.add_argument("--horizon", type=int, default=300, help="蒙地卡羅模擬筆數")
+    ap.add_argument("--unit", choices=["pct", "r"], default="pct",
+                    help="r = 以 R 倍數檢定並用風險定倉蒙地卡羅（需 CSV 有 risk_pct）")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -243,8 +315,16 @@ def main():
         pass
 
     trades = read_trades_csv(args.trades)
-    print(gate(trades, args.n_trials).render())
+    print(gate(trades, args.n_trials, unit=args.unit).render())
     print()
+    if args.unit == "r":
+        p = np.array([t.pnl_pct for t in trades])
+        rr = np.array([t.r() for t in trades])
+        print(f"  勝率 {np.mean(p > 0)*100:.1f}% | 平均獲利 {rr[rr > 0].mean() if (rr > 0).any() else 0:+.2f}R"
+              f" | 平均虧損 {rr[rr <= 0].mean() if (rr <= 0).any() else 0:+.2f}R | 每筆 {rr.mean():+.3f}R")
+        print()
+        print(risk_table(trades, leverage=args.leverage, n_trades=args.horizon))
+        return
     levs = sorted({3, 5, 10, 20, 27, int(args.leverage)})
     maes = [t.mae_pct for t in trades]
     print(leverage_table([t.pnl_pct for t in trades], args.position_pct, levs, args.horizon,
