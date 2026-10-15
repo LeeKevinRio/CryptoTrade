@@ -2,7 +2,7 @@
 
 # 投資組合型候選 開發輪 2026-10-15（候選池 A 半，每週過去 30 天成交額前 10 名）
 
-資料：2023-10-01 ~ 2026-09-30，43 個幣：AAVEUSDT AEROUSDT ARBUSDT AVAUSDT BATUSDT BERAUSDT BLURUSDT BTCUSDT CHIPUSDT CRVUSDT DOGEUSDT DUSKUSDT EPICUSDT ETHUSDT FILUSDT HBARUSDT ICPUSDT LINKUSDT MAGICUSDT MEGAUSDT MUBARAKUSDT NEARUSDT OPENUSDT PENDLEUSDT PLUMEUSDT PUMPUSDT QNTUSDT RAYUSDT RLCUSDT RSRUSDT SEIUSDT SOLUSDT SUIUSDT TAOUSDT TONUSDT TRUMPUSDT UNIUSDT WCTUSDT WUSDT XPLUSDT ZAMAUSDT ZKUSDT 牛来USDT
+資料：2023-10-01 ~ 2026-09-30，43 個幣：AAVEUSDT AEROUSDT ARBUSDT AVAUSDT BATUSDT BERAUSDT BLURUSDT BTCUSDT CHIPUSDT CRVUSDT DOGEUSDT DUSKUSDT EPICUSDT ETHUSDT FILUSDT HBARUSDT ICPUSDT LINKUSDT MAGICUSDT MEGAUSDT MUBARAKUSDT NEARUSDT OPENUSDT PENDLEUSDT PLUMEUSDT PUMPUSDT QNTUSDT RAYUSDT RLCUSDT RSRUSDT SEIUSDT SOLUSDT SUIUSDT TAOUSDT TONUSDT TRUMPUSDT UNIUSDT WALUSDT WUSDT XPLUSDT ZAMAUSDT ZKUSDT 牛来USDT
 
 walk-forward 訓練 52 週 / 測試 4 週；多重比較校正 24 組；樣本數門檻 80 週；每週可交易池＝過去 30 天成交額前 10 名
 
@@ -10,23 +10,23 @@ walk-forward 訓練 52 週 / 測試 4 週；多重比較校正 24 組；樣本�
 ```
   上線關卡（全部通過才可上真金）
     ✅ 樣本數            100 筆（需 ≥ 80）
-    ❌ 顯著性            t = 0.14（需 ≥ 2.87，已校正 24 組參數試驗）
-    ❌ 信賴區間           每筆期望 95% CI [-1.7650%, +2.2053%]（下限需 > 0）
-    ✅ 成本壓力           每筆再扣 0.05% 後期望 +0.0971%（需 > 0）
-    ❌ 期間穩定           50% 的期間獲利（24 期，需 ≥ 55%）
-    ❌ 不靠單一標的         拿掉最賺的 UNIUSDT 後其餘合計 -8.3%（需 > 0）
-    ❌ 前後半一致          前半 +21.9% / 後半 -7.2%（兩段都需 > 0）
+    ❌ 顯著性            t = 0.12（需 ≥ 2.87，已校正 24 組參數試驗）
+    ❌ 信賴區間           每筆期望 95% CI [-1.7715%, +2.1761%]（下限需 > 0）
+    ✅ 成本壓力           每筆再扣 0.05% 後期望 +0.0726%（需 > 0）
+    ❌ 期間穩定           54% 的期間獲利（24 期，需 ≥ 55%）
+    ❌ 不靠單一標的         拿掉最賺的 UNIUSDT 後其餘合計 -21.1%（需 > 0）
+    ❌ 前後半一致          前半 +23.8% / 後半 -11.5%（兩段都需 > 0）
   → 未通過
 
-  樣本外 100 週 | 週勝率 47.0% | 平均週報酬 +0.147% | 年化 +7.9% | 1x 累計 -28.1% | 最大回撤 72.1%
+  樣本外 100 週 | 週勝率 46.0% | 平均週報酬 +0.123% | 年化 +6.6% | 1x 累計 -29.9% | 最大回撤 72.8%
 
   槓桿蒙地卡羅（52 筆 ≈ 實盤數個月，起始 500 U，倉位 = 每筆保證金占帳戶 %）
-        1x × 倉位  100%  爆倉(-50%)  41.8%  歸零   0.0%  期末中位    345.7  [5%:   114.7, 95%:   1084.1]  回撤中位 54.5%  中途強平  0.0%
-        2x × 倉位  100%  爆倉(-50%)  76.5%  歸零  12.5%  期末中位    154.8  [5%:    13.6, 95%:   1488.1]  回撤中位 84.5%  中途強平  0.0%
-        3x × 倉位  100%  爆倉(-50%)  89.1%  歸零  53.1%  期末中位     32.2  [5%:     0.2, 95%:   1379.4]  回撤中位 97.5%  中途強平  0.0%
+        1x × 倉位  100%  爆倉(-50%)  42.0%  歸零   0.0%  期末中位    341.9  [5%:   115.5, 95%:   1040.6]  回撤中位 54.0%  中途強平  0.0%
+        2x × 倉位  100%  爆倉(-50%)  76.7%  歸零  12.7%  期末中位    152.6  [5%:    13.7, 95%:   1401.4]  回撤中位 84.5%  中途強平  0.0%
+        3x × 倉位  100%  爆倉(-50%)  89.5%  歸零  53.4%  期末中位     29.8  [5%:     0.2, 95%:   1330.6]  回撤中位 97.4%  中途強平  0.0%
         5x × 倉位  100%  ⚠ 強平線（19.5%）比停損近、又沒有 MAE 資料 → 無法模擬
 
-  各折選到的參數（次數）：{'k': 5, 'lookback': 7, 'mode': 'ls'} ×9；{'k': 3, 'lookback': 14, 'mode': 'long'} ×6；{'k': 3, 'lookback': 7, 'mode': 'long'} ×4；{'k': 3, 'lookback': 28, 'mode': 'long'} ×3
+  各折選到的參數（次數）：{'k': 5, 'lookback': 7, 'mode': 'ls'} ×10；{'k': 3, 'lookback': 14, 'mode': 'long'} ×5；{'k': 3, 'lookback': 28, 'mode': 'long'} ×4；{'k': 3, 'lookback': 7, 'mode': 'long'} ×4
 ```
 
 ## carry
@@ -59,7 +59,7 @@ walk-forward 訓練 52 週 / 測試 4 週；多重比較校正 24 組；樣本�
 
 # 投資組合型候選 最終確認 2026-10-15（候選池 B 半，開發輪沒用過的幣）
 
-資料：2023-10-01 ~ 2026-09-30，37 個幣：ADAUSDT APTUSDT ASTERUSDT AVAXUSDT BCHUSDT BNBUSDT CAKEUSDT DASHUSDT DOTUSDT ENAUSDT ETHFIUSDT FETUSDT GRAMUSDT HYPEUSDT INJUSDT JTOUSDT LDOUSDT LTCUSDT MARSCOINUSDT NILUSDT ONDOUSDT OPUSDT PENGUUSDT POLUSDT PYTHUSDT RENDERUSDT STRKUSDT SUSDT TIAUSDT TRXUSDT USUALUSDT WALUSDT WLDUSDT XLMUSDT XRPUSDT ZECUSDT ZROUSDT
+資料：2023-10-01 ~ 2026-09-30，37 個幣：ADAUSDT APTUSDT ASTERUSDT AVAXUSDT BCHUSDT BNBUSDT CAKEUSDT DASHUSDT DOTUSDT ENAUSDT ETHFIUSDT FETUSDT GRAMUSDT HYPEUSDT INJUSDT JTOUSDT LDOUSDT LTCUSDT MARSCOINUSDT NILUSDT ONDOUSDT OPUSDT PENGUUSDT POLUSDT PYTHUSDT RENDERUSDT STRKUSDT SUSDT TIAUSDT TRXUSDT USUALUSDT VIRTUALUSDT WLDUSDT XLMUSDT XRPUSDT ZECUSDT ZROUSDT
 
 walk-forward 訓練 52 週 / 測試 4 週；多重比較校正 1 組；樣本數門檻 80 週；每週可交易池＝過去 30 天成交額前 10 名
 
@@ -67,31 +67,31 @@ walk-forward 訓練 52 週 / 測試 4 週；多重比較校正 1 組；樣本數
 ```
   上線關卡（全部通過才可上真金）
     ✅ 樣本數            100 筆（需 ≥ 80）
-    ❌ 顯著性            t = 0.79（需 ≥ 2.00，已校正 1 組參數試驗）
-    ❌ 信賴區間           每筆期望 95% CI [-1.1054%, +2.8472%]（下限需 > 0）
-    ✅ 成本壓力           每筆再扣 0.05% 後期望 +0.7620%（需 > 0）
+    ❌ 顯著性            t = 0.94（需 ≥ 2.00，已校正 1 組參數試驗）
+    ❌ 信賴區間           每筆期望 95% CI [-0.9943%, +3.0185%]（下限需 > 0）
+    ✅ 成本壓力           每筆再扣 0.05% 後期望 +0.9185%（需 > 0）
     ❌ 期間穩定           42% 的期間獲利（24 期，需 ≥ 55%）
-    ✅ 不靠單一標的         拿掉最賺的 XRPUSDT 後其餘合計 +7.9%（需 > 0）
-    ❌ 前後半一致          前半 +110.1% / 後半 -28.9%（兩段都需 > 0）
+    ✅ 不靠單一標的         拿掉最賺的 XRPUSDT 後其餘合計 +23.5%（需 > 0）
+    ❌ 前後半一致          前半 +112.1% / 後半 -15.3%（兩段都需 > 0）
   → 未通過
 
-  樣本外 100 週 | 週勝率 45.0% | 平均週報酬 +0.812% | 年化 +52.3% | 1x 累計 +41.1% | 最大回撤 59.4%
+  樣本外 100 週 | 週勝率 47.0% | 平均週報酬 +0.968% | 年化 +65.1% | 1x 累計 +63.7% | 最大回撤 53.3%
 
   槓桿蒙地卡羅（52 筆 ≈ 實盤數個月，起始 500 U，倉位 = 每筆保證金占帳戶 %）
-        1x × 倉位  100%  爆倉(-50%)  24.5%  歸零   0.0%  期末中位    495.0  [5%:   180.0, 95%:   2163.6]  回撤中位 46.6%  中途強平  0.0%
-        2x × 倉位  100%  爆倉(-50%)  64.4%  歸零   0.8%  期末中位    330.3  [5%:    48.5, 95%:   4881.0]  回撤中位 75.6%  中途強平  0.0%
-        3x × 倉位  100%  爆倉(-50%)  81.0%  歸零  21.5%  期末中位    154.5  [5%:     9.0, 95%:   6599.6]  回撤中位 91.3%  中途強平  0.0%
-        5x × 倉位  100%  爆倉(-50%)  95.1%  歸零  74.7%  期末中位      8.0  [5%:     0.0, 95%:   2979.5]  回撤中位 99.6%  中途強平  0.0%
+        1x × 倉位  100%  爆倉(-50%)  19.8%  歸零   0.0%  期末中位    541.5  [5%:   199.1, 95%:   2337.3]  回撤中位 44.6%  中途強平  0.0%
+        2x × 倉位  100%  爆倉(-50%)  60.9%  歸零   0.4%  期末中位    389.8  [5%:    58.4, 95%:   5525.7]  回撤中位 73.7%  中途強平  0.0%
+        3x × 倉位  100%  爆倉(-50%)  79.0%  歸零  17.4%  期末中位    196.0  [5%:    12.2, 95%:   8060.6]  回撤中位 90.0%  中途強平  0.0%
+        5x × 倉位  100%  爆倉(-50%)  94.4%  歸零  71.8%  期末中位     11.4  [5%:     0.1, 95%:   3957.2]  回撤中位 99.5%  中途強平  0.0%
 
-  各折選到的參數（次數）：{'k': 3, 'lookback': 14, 'mode': 'long'} ×7；{'k': 3, 'lookback': 28, 'mode': 'ls'} ×6；{'k': 5, 'lookback': 14, 'mode': 'ls'} ×5；{'k': 3, 'lookback': 28, 'mode': 'long'} ×3
+  各折選到的參數（次數）：{'k': 3, 'lookback': 14, 'mode': 'long'} ×8；{'k': 3, 'lookback': 28, 'mode': 'ls'} ×6；{'k': 5, 'lookback': 14, 'mode': 'ls'} ×4；{'k': 3, 'lookback': 28, 'mode': 'long'} ×3
 ```
 
 ## carry
 ```
   上線關卡（全部通過才可上真金）
     ✅ 樣本數            100 筆（需 ≥ 80）
-    ✅ 顯著性            t = 6.30（需 ≥ 2.00，已校正 1 組參數試驗）
-    ✅ 信賴區間           每筆期望 95% CI [+0.0261%, +0.0485%]（下限需 > 0）
+    ✅ 顯著性            t = 6.31（需 ≥ 2.00，已校正 1 組參數試驗）
+    ✅ 信賴區間           每筆期望 95% CI [+0.0260%, +0.0485%]（下限需 > 0）
     ❌ 成本壓力           每筆再扣 0.05% 後期望 -0.0132%（需 > 0）
     ❌ 期間穩定           54% 的期間獲利（24 期，需 ≥ 55%）
     ✅ 不靠單一標的         拿掉最賺的 HYPEUSDT 後其餘合計 +2.1%（需 > 0）
@@ -102,9 +102,9 @@ walk-forward 訓練 52 週 / 測試 4 週；多重比較校正 1 組；樣本數
 
   槓桿蒙地卡羅（52 筆 ≈ 實盤數個月，起始 500 U，倉位 = 每筆保證金占帳戶 %）
         1x × 倉位  100%  爆倉(-50%)   0.0%  歸零   0.0%  期末中位    509.2  [5%:   503.6, 95%:    516.0]  回撤中位  0.1%  中途強平  0.0%
-        2x × 倉位  100%  爆倉(-50%)   0.0%  歸零   0.0%  期末中位    518.6  [5%:   507.3, 95%:    532.5]  回撤中位  0.1%  中途強平  0.0%
-        3x × 倉位  100%  爆倉(-50%)   0.0%  歸零   0.0%  期末中位    528.1  [5%:   511.0, 95%:    549.5]  回撤中位  0.2%  中途強平  0.0%
-        5x × 倉位  100%  爆倉(-50%)   0.0%  歸零   0.0%  期末中位    547.6  [5%:   518.4, 95%:    585.2]  回撤中位  0.4%  中途強平  0.0%
+        2x × 倉位  100%  爆倉(-50%)   0.0%  歸零   0.0%  期末中位    518.6  [5%:   507.2, 95%:    532.5]  回撤中位  0.1%  中途強平  0.0%
+        3x × 倉位  100%  爆倉(-50%)   0.0%  歸零   0.0%  期末中位    528.1  [5%:   510.9, 95%:    549.5]  回撤中位  0.2%  中途強平  0.0%
+        5x × 倉位  100%  爆倉(-50%)   0.0%  歸零   0.0%  期末中位    547.6  [5%:   518.3, 95%:    585.0]  回撤中位  0.4%  中途強平  0.0%
 
   各折選到的參數（次數）：{'entry_apr': 20, 'exit_ratio': 0.0, 'lookback': 7} ×9；{'entry_apr': 30, 'exit_ratio': 0.0, 'lookback': 7} ×8；{'entry_apr': 20, 'exit_ratio': 0.0, 'lookback': 3} ×6；{'entry_apr': 10, 'exit_ratio': 0.0, 'lookback': 7} ×2
 ```
