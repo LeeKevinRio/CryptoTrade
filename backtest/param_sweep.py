@@ -218,7 +218,8 @@ def fast_backtest(
             if reason is not None:
                 pnls.append(round(realized, 3))
                 if trades_out is not None:   # 逐筆明細（live_replay 對照實盤用）
-                    trades_out.append((i, j, int(side), round(realized, 3), reason))
+                    # 最後一欄 = 持倉期間最大逆向波動 MAE（≤0，%）：判斷高槓桿下是否中途已被強平
+                    trades_out.append((i, j, int(side), round(realized, 3), reason, round(lowest, 3)))
                 i = j + 1
                 exited = True
                 break

@@ -54,7 +54,7 @@ def replay_symbol(sym: str, bot_cfg: dict, window_days: int, replay) -> list[dic
     fast_backtest(closes[start:], highs[start:], lows[start:], sides[start:], params,
                   activation, warmup=0, close_pcts=close_pcts, trades_out=trades)
     out = []
-    for i, j, side, pnl, reason in trades:
+    for i, j, side, pnl, reason, *_ in trades:
         out.append({
             "symbol": sym,
             "entry": df.index[start + i],
