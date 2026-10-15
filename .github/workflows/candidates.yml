@@ -1,0 +1,97 @@
+# 順勢候選策略驗證：成交量前 15 + 現役 7 標的 × 2 年 1h × walk-forward（訓練 180 天 / 測試 30 天）
+# 每族樣本外交易 → 上線關卡（多重比較以三族總組合數校正）+ 槓桿蒙地卡羅
+# 產出 reports/candidates-YYYY-MM-DD.md
+name: 順勢候選驗證
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backtest/.candidates-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  symbols:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.s.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml
+      - id: s
+        run: |
+          TOP=$(python -m backtest.top_volume --top 15 --json || echo '[]')
+          LIST=$(python -c "import json,yaml,sys;a=json.loads(sys.argv[1]);b=yaml.safe_load(open('config/settings.yaml'))['trading']['symbols'];print(json.dumps(list(dict.fromkeys(a+b))))" "$TOP")
+          echo "$LIST"
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+
+  wf:
+    needs: symbols
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: ${{ fromJSON(needs.symbols.outputs.list) }}
+    env:
+      BINANCE_API_KEY: backtest-offline
+      BINANCE_API_SECRET: backtest-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 1h --days 730
+      - run: python -m backtest.candidates --symbol ${{ matrix.symbol }} --days 730 --out out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cand-${{ matrix.symbol }}
+          path: out/*.csv
+
+  gate:
+    needs: wf
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install numpy pandas pyyaml
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/c
+          merge-multiple: true
+      - name: 彙整 → 上線關卡
+        run: |
+          D=$(date -u +%F); mkdir -p reports
+          NT=$(python -c "from backtest.candidates import total_trials;print(total_trials())")
+          {
+            echo "# 順勢候選驗證 $D（2 年 1h，walk-forward 樣本外，多重比較校正 $NT 組）"; echo
+            echo "標的：$(ls /tmp/c/donchian-*.csv | sed 's#.*/donchian-##;s#\.csv##' | tr '\n' ' ')"; echo
+            for fam in donchian ema_cross squeeze; do
+              f=/tmp/$fam.csv
+              head -1 "$(ls /tmp/c/$fam-*.csv | head -1)" > $f
+              for x in /tmp/c/$fam-*.csv; do tail -n +2 "$x" >> $f; done
+              echo "## $fam"; echo '```'
+              python -m backtest.validation --trades $f --n-trials $NT
+              echo '```'; echo
+            done
+          } > reports/candidates-$D.md
+          cat reports/candidates-$D.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: 順勢候選驗證報告（Actions 自動產出）"
+          git push
