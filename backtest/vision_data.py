@@ -4,7 +4,7 @@ REST API 單次最多 1000 筆、資金費率歷史要逐幣翻頁，且部分�
 官方 S3 月檔沒有這些問題，一個月一個 zip，並行下載數十個幣 × 3 年只要數分鐘。
 
     from backtest.vision_data import daily_panel
-    closes, funding = daily_panel(["BTCUSDT", "ETHUSDT"], months=36)
+    closes, funding, quote_volume = daily_panel(["BTCUSDT", "ETHUSDT"], months=36)
 """
 
 import asyncio
@@ -55,10 +55,10 @@ def _to_ts(v: pd.Series) -> pd.Series:
 
 def parse_klines(raw: bytes) -> pd.DataFrame:
     df = _read_csv(raw)
-    df = df.iloc[:, :6]
-    df.columns = ["open_time", "open", "high", "low", "close", "volume"]
+    df = df.iloc[:, :8]
+    df.columns = ["open_time", "open", "high", "low", "close", "volume", "close_time", "quote_volume"]
     df["date"] = _to_ts(df["open_time"]).dt.normalize()
-    return df.set_index("date")[["open", "high", "low", "close", "volume"]].astype(float)
+    return df.set_index("date")[["open", "high", "low", "close", "volume", "quote_volume"]].astype(float)
 
 
 def parse_funding(raw: bytes) -> pd.DataFrame:
@@ -104,22 +104,25 @@ async def _download(symbols, months, kind, concurrency=24) -> dict[str, list[byt
     return out
 
 
-def daily_panel(symbols: list[str], months: int = 36) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """回傳 (收盤價, 每日資金費率合計)，皆為 日期 × 標的；缺資料為 NaN。
+def daily_panel(symbols: list[str], months: int = 36):
+    """回傳 (收盤價, 每日資金費率合計, 每日成交額 USDT)，皆為 日期 × 標的；缺資料為 NaN。
 
     每日資金費率合計 = 當日（UTC）所有結算的費率加總；正值代表多單付給空單。
     """
     ms = month_list(months)
     kl = asyncio.run(_download(symbols, ms, "klines"))
     fr = asyncio.run(_download(symbols, ms, "funding"))
-    closes, funding = {}, {}
+    closes, funding, qvol = {}, {}, {}
     for sym in symbols:
         if kl[sym]:
             k = pd.concat([parse_klines(r) for r in kl[sym]]).sort_index()
-            closes[sym] = k["close"][~k.index.duplicated()]
+            k = k[~k.index.duplicated()]
+            closes[sym] = k["close"]
+            qvol[sym] = k["quote_volume"]
         if fr[sym]:
             f = pd.concat([parse_funding(r) for r in fr[sym]])
             funding[sym] = f.groupby(f["time"].dt.normalize())["rate"].sum()
     c = pd.DataFrame(closes).sort_index()
     f = pd.DataFrame(funding).reindex(c.index).reindex(columns=c.columns)
-    return c, f
+    v = pd.DataFrame(qvol).reindex(c.index).reindex(columns=c.columns)
+    return c, f, v

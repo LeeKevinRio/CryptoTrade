@@ -133,3 +133,20 @@ class TestVisionParse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPointInTimeUniverse(unittest.TestCase):
+    def test_uses_only_past_volume(self):
+        idx = pd.date_range("2024-01-01", periods=60, freq="D", tz="UTC")
+        v = pd.DataFrame({"A": 1.0, "B": 2.0, "C": 3.0}, index=idx)
+        v.loc[idx[40]:, "A"] = 1e9                      # A 在第 40 天後才爆量
+        e = pf.pit_universe(v, top_n=2, window=5)
+        self.assertFalse(e[39, 0])                      # 爆量前：A 不在池內
+        self.assertTrue(e[45, 0])                       # 爆量 5 天後：A 進池
+        self.assertFalse(e[3].any())                    # 暖身不足：誰都不可交易
+
+    def test_xsmom_respects_universe(self):
+        c, f = _panel(120)
+        none = np.zeros(c.shape, dtype=bool)
+        weeks = pf.xsmom_weeks(c, f, 14, 2, "ls", eligible=none)
+        self.assertTrue(all(w.ret == 0 and not w.contrib for w in weeks))

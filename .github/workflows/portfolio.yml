@@ -1,6 +1,6 @@
 # 投資組合型候選驗證（橫截面動能 / 資金費率套利）
-#   trigger 內容 "dev"              → 成交量前 20 名（開發輪，兩個策略、多重比較校正 24 組）
-#   trigger 內容 "holdout:<策略>"   → 成交量第 21~45 名（開發輪沒用過的幣），只驗該策略
+# 每週可交易池＝過去 30 天成交額前 10 名（point-in-time，避免「用今天的贏家回測過去」）
+# 候選池（當前前 100 名）切兩半：A 半開發、B 半最終確認
 # 資料：data.binance.vision U 本位合約月檔（日 K + 資金費率），36 個月
 name: 投資組合候選驗證
 
@@ -27,27 +27,21 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: 驗證
+      - name: 驗證（開發半 A + 確認半 B）
         run: |
-          MODE=$(cat backtest/.portfolio-trigger | tr -d '[:space:]')
-          ALL=$(python -m backtest.top_volume --top 45 --json)
-          PICK=$(python - "$ALL" "$MODE" <<'PY'
-          import json, sys
-          from backtest.candidates import EXCLUDED
-          syms = [s for s in json.loads(sys.argv[1]) if s not in EXCLUDED]
-          mode = sys.argv[2]
-          print(",".join(syms[20:] if mode.startswith("holdout:") else syms[:20]))
-          PY
-          )
+          # 候選池＝當前成交量前 100 名，依字母序奇偶切成互不重疊的兩半。
+          # 事先定好的選擇規則：以 A 半（開發）結果選策略 —— 過關項數多者勝，平手比 t 值；
+          # B 半（從未用於開發）只用來確認被選中的那個，n_trials=1。
+          ALL=$(python -m backtest.top_volume --top 100 --json)
+          PICK=$(python -c "import json,sys;from backtest.candidates import EXCLUDED;print(','.join(s for s in json.loads(sys.argv[1]) if s not in EXCLUDED))" "$ALL")
           D=$(date -u +%F); mkdir -p reports
-          if echo "$MODE" | grep -q '^holdout:'; then
-            S=${MODE#holdout:}
-            python -m backtest.portfolio --symbols "$PICK" --strategies "$S" --n-trials 1 \
-              --title "最終確認 $D — $S（開發輪沒用過的成交量 21~45 名）" --out reports/portfolio-holdout-$S-$D.md
-          else
-            python -m backtest.portfolio --symbols "$PICK" \
-              --title "開發輪 $D（成交量前 20 名）" --out reports/portfolio-dev-$D.md
-          fi
+          python -m backtest.portfolio --symbols "$PICK" --half A --top-n 10 \
+            --title "開發輪 $D（候選池 A 半，每週過去 30 天成交額前 10 名）" --out /tmp/a.md
+          python -m backtest.portfolio --symbols "$PICK" --half B --top-n 10 --n-trials 1 \
+            --title "最終確認 $D（候選池 B 半，開發輪沒用過的幣）" --out /tmp/b.md
+          { echo "> 選擇規則（跑之前定好）：只看 A 半選策略（過關項數多者，平手比 t 值），B 半只確認被選中者。"; echo;
+            cat /tmp/a.md; echo; echo "---"; echo; cat /tmp/b.md; } > reports/portfolio-pit-$D.md
+          cat reports/portfolio-pit-$D.md
       - name: 提交報告
         run: |
           git config user.name "github-actions[bot]"
