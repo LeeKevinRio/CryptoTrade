@@ -144,3 +144,52 @@ class TestMonteCarlo(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRiskUnits(unittest.TestCase):
+    def test_r_multiple(self):
+        t = Trade("X", "2026-01", -2.08, -2.5, 2.0)
+        self.assertAlmostEqual(t.r(), -1.04)
+        self.assertAlmostEqual(t.r(0.05), -1.065)
+
+    def test_gate_r_requires_risk(self):
+        with self.assertRaises(ValueError):
+            gate([Trade("X", "2026-01", 1.0)] * 10, unit="r")
+
+    def test_r_units_neutralize_volatile_symbol(self):
+        """高波動標的名目 % 很大會主宰 % 統計；換成 R 後每筆權重一致"""
+        rng = np.random.default_rng(11)
+        trades = []
+        for i in range(1400):
+            sym = SYMS[i % 7]
+            risk = 10.0 if sym == "DOGEUSDT" else 1.0          # DOGE 停損距離大 10 倍
+            r = rng.choice([2.5, -1.0], p=[0.4, 0.6])          # 每筆 +0.4R 的真 edge
+            pnl = r * risk
+            if sym == "DOGEUSDT":
+                pnl -= 6.0                                     # DOGE 名目上大賠
+            trades.append(Trade(sym, f"2026-{(i * 12 // 1400) + 1:02d}", pnl, min(pnl, 0), risk))
+        self.assertFalse(_check(gate(trades), "不靠單一標的") and gate(trades).passed)
+        self.assertGreater(gate(trades, unit="r").stats["mean"], 0)
+
+
+class TestRiskSizedMonteCarlo(unittest.TestCase):
+    def test_stop_loses_exactly_risk(self):
+        from backtest.validation import monte_carlo_risk
+        t = [Trade("X", "p", -2.0, -2.0, 2.0)]
+        m = monte_carlo_risk(t, risk_per_trade_pct=1.0, leverage=10, n_trades=1, n_paths=3, block=1)
+        self.assertAlmostEqual(m.median_final, 0.99)          # 打到停損 = 賠帳戶 1%
+
+    def test_gap_beyond_liquidation_loses_margin(self):
+        from backtest.validation import monte_carlo_risk
+        # 停損 1%，風險 2% → 名目 2 倍權益；10x 保證金 = 20%；跳空 -12% 超過強平 9.5%
+        t = [Trade("X", "p", -12.0, -12.0, 1.0)]
+        m = monte_carlo_risk(t, 2.0, leverage=10, n_trades=1, n_paths=3, block=1)
+        self.assertAlmostEqual(m.median_final, 0.8)
+        self.assertEqual(m.liquidated_share, 1.0)
+
+    def test_notional_capped_by_leverage(self):
+        from backtest.validation import monte_carlo_risk
+        # 停損只有 0.1%、風險 5% → 想下 50 倍權益，但 10x 最多 10 倍
+        t = [Trade("X", "p", 1.0, 0.0, 0.1)]
+        m = monte_carlo_risk(t, 5.0, leverage=10, n_trades=1, n_paths=3, block=1)
+        self.assertAlmostEqual(m.median_final, 1.10)

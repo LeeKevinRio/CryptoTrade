@@ -33,11 +33,20 @@ from src.indicators.atr import calculate_atr
 
 FEE = 0.08   # % 名目，來回（taker 進出 0.04% × 2）
 
-FAMILIES = {
+_BASE = {
     "donchian": {"n": [24, 72, 168], "stop_atr": [1.5, 2.5], "trail_atr": [3.0, 5.0]},
     "ema_cross": {"n": [50, 100, 200], "stop_atr": [1.5, 2.5], "trail_atr": [3.0, 5.0]},
     "squeeze": {"pct": [0.1, 0.2], "stop_atr": [1.5, 2.5], "trail_atr": [3.0, 5.0]},
 }
+# 第二輪（2026-10-15 首輪三族皆未過關後加入）：大方向過濾 —— 只做順著 30 天趨勢的方向。
+# 假設：逆大勢的突破多為假突破。過濾參數固定不掃（EMA 720 根 1h ≈ 30 天、斜率看 24 根），
+# 不增加選參自由度；但族數翻倍，多重比較的試驗數照實累計。
+FAMILIES = {**_BASE, **{f"{k}_t": v for k, v in _BASE.items()}}
+TREND_EMA, TREND_SLOPE = 720, 24
+
+# 非加密資產或結構特殊、不納入順勢驗證的標的
+EXCLUDED = {"XAUTUSDT", "PAXGUSDT", "USDCUSDT", "FDUSDUSDT"}
+MIN_HISTORY_SHARE = 0.9    # 歷史不足要求天數 90% 的新幣不納入（walk-forward 折數不夠）
 
 
 def combos(family: str) -> list[dict]:
@@ -80,14 +89,32 @@ def signal_squeeze(df: pd.DataFrame, pct: float, bb_n: int = 20, rank_n: int = 5
     return s.astype(np.int8)
 
 
-SIGNALS = {"donchian": signal_donchian, "ema_cross": signal_ema_cross, "squeeze": signal_squeeze}
+def trend_direction(df: pd.DataFrame) -> np.ndarray:
+    """大方向：收盤在 EMA720 之上且 EMA 上彎 → +1；之下且下彎 → -1；其餘 0"""
+    ema = df["close"].ewm(span=TREND_EMA, adjust=False, min_periods=TREND_EMA).mean()
+    slope = ema - ema.shift(TREND_SLOPE)
+    up = (df["close"] > ema) & (slope > 0)
+    dn = (df["close"] < ema) & (slope < 0)
+    return np.where(up, 1, np.where(dn, -1, 0)).astype(np.int8)
+
+
+def _with_trend(fn):
+    def wrapped(df, **p):
+        s = fn(df, **p)
+        return np.where(s == trend_direction(df), s, 0).astype(np.int8)
+    return wrapped
+
+
+_BASE_SIGNALS = {"donchian": signal_donchian, "ema_cross": signal_ema_cross, "squeeze": signal_squeeze}
+SIGNALS = {**_BASE_SIGNALS, **{f"{k}_t": _with_trend(fn) for k, fn in _BASE_SIGNALS.items()}}
 
 
 # ── 出場模擬 ───────────────────────────────────────────────────────────────
 
 def simulate(df: pd.DataFrame, sides: np.ndarray, stop_atr: float, trail_atr: float,
              atr: np.ndarray | None = None, **_) -> list[tuple]:
-    """逐根模擬，同時只持有一筆。回傳 [(entry_i, exit_i, side, pnl_pct(已扣費), mae_pct)]"""
+    """逐根模擬，同時只持有一筆。
+    回傳 [(entry_i, exit_i, side, pnl_pct(已扣費), mae_pct, risk_pct(初始停損距離))]"""
     o, h, l, c = (df[x].to_numpy(float) for x in ("open", "high", "low", "close"))
     if atr is None:
         atr = calculate_atr(df, 14).to_numpy(float)
@@ -125,7 +152,8 @@ def simulate(df: pd.DataFrame, sides: np.ndarray, stop_atr: float, trail_atr: fl
             break            # 持倉到資料結尾 → 不計入
         pnl = (exit_px - entry) / entry * 100 * side - FEE
         mae = (worst - entry) / entry * 100 * side
-        out.append((i, j, int(side), float(pnl), float(min(mae, 0.0))))
+        risk = stop_atr * a / entry * 100
+        out.append((i, j, int(side), float(pnl), float(min(mae, 0.0)), float(risk)))
         i = j + 1
     return out
 
@@ -134,7 +162,8 @@ def simulate(df: pd.DataFrame, sides: np.ndarray, stop_atr: float, trail_atr: fl
 
 def walk_forward(df: pd.DataFrame, family: str, symbol: str, train_bars: int, test_bars: int,
                  min_trades: int = 5) -> list[Trade]:
-    """每個參數組合只模擬一次全序列（模擬本身是因果的），再依進場時點切窗：
+    """選參指標＝訓練窗平均 R 倍數（與風險定倉一致）。
+    每個參數組合只模擬一次全序列（模擬本身是因果的），再依進場時點切窗：
     訓練窗只採計「進場與出場都在窗內」的交易 → 選參絕不會看到測試期；
     測試窗採計「在窗內進場」的交易（出場可延伸到窗外，那只是該筆的實際結果）。"""
     atr = calculate_atr(df, 14).to_numpy(float)
@@ -151,13 +180,13 @@ def walk_forward(df: pd.DataFrame, family: str, symbol: str, train_bars: int, te
         tr_s, tr_e, te_e = start, start + train_bars, start + train_bars + test_bars
         best_p, best_e = None, -1e9
         for p, tr in sims:
-            pn = [t[3] for t in tr if tr_s <= t[0] and t[1] < tr_e]
+            pn = [t[3] / t[5] for t in tr if tr_s <= t[0] and t[1] < tr_e]
             if len(pn) >= min_trades and np.mean(pn) > best_e:
                 best_p, best_e = p, float(np.mean(pn))
         if best_p is not None:
             chosen = next(tr for p, tr in sims if p is best_p)
             period = f"{idx[tr_e]:%Y-%m}"
-            trades += [Trade(symbol, period, t[3], t[4]) for t in chosen if tr_e <= t[0] < te_e]
+            trades += [Trade(symbol, period, t[3], t[4], t[5]) for t in chosen if tr_e <= t[0] < te_e]
         start += test_bars
     return trades
 
@@ -169,6 +198,7 @@ def main():
     ap.add_argument("--train", type=int, default=180, help="訓練窗（天）")
     ap.add_argument("--test", type=int, default=30, help="測試窗（天）")
     ap.add_argument("--out", default="out", help="輸出資料夾：<family>-<symbol>.csv")
+    ap.add_argument("--families", default=None, help="逗號分隔；預設全部")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -177,16 +207,24 @@ def main():
     logging.disable(logging.INFO)
 
     from backtest.fetch_klines import get_klines_df
+    if args.symbol in EXCLUDED:
+        print(f"  {args.symbol}: 排除（非加密資產）")
+        return
     df = asyncio.run(get_klines_df(args.symbol, "1h", args.days))
     print(f"  {args.symbol}: {len(df):,} 根 1h（{df.index[0]:%Y-%m-%d} ~ {df.index[-1]:%Y-%m-%d}）")
+    if len(df) < args.days * 24 * MIN_HISTORY_SHARE:
+        print(f"  {args.symbol}: 歷史不足 {MIN_HISTORY_SHARE*100:.0f}% × {args.days} 天，排除")
+        return
     Path(args.out).mkdir(parents=True, exist_ok=True)
-    for fam in FAMILIES:
+    fams = args.families.split(",") if args.families else list(FAMILIES)
+    for fam in fams:
         t = walk_forward(df, fam, args.symbol, args.train * 24, args.test * 24)
         write_trades_csv(f"{args.out}/{fam}-{args.symbol}.csv", t)
         p = np.array([x.pnl_pct for x in t])
+        r = np.array([x.r() for x in t])
         if len(p):
-            print(f"    {fam:<10} 樣本外 {len(p):>4} 筆  勝率 {np.mean(p > 0)*100:5.1f}%  "
-                  f"期望 {p.mean():+.3f}%  累計 {p.sum():+7.1f}%")
+            print(f"    {fam:<12} 樣本外 {len(p):>4} 筆  勝率 {np.mean(p > 0)*100:5.1f}%  "
+                  f"每筆 {p.mean():+.3f}% / {r.mean():+.3f}R  累計 {r.sum():+7.1f}R")
         else:
             print(f"    {fam:<10} 樣本外 0 筆")
 
