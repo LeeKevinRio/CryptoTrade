@@ -76,7 +76,7 @@ def _t_stat(p: np.ndarray) -> float:
 
 
 def gate(trades: list[Trade], n_trials: int = 1, c: Criteria | None = None,
-         seed: int = 0, unit: str = "pct") -> GateResult:
+         seed: int = 0, unit: str = "pct", symbol_contrib: dict | None = None) -> GateResult:
     """unit="pct" 以名目損益 % 檢定；unit="r" 以 R 倍數檢定（風險定倉的策略該用這個：
     每筆虧損固定為帳戶的同一比例，高波動標的不會因名目 % 大而主宰統計）"""
     c = c or Criteria()
@@ -117,8 +117,9 @@ def gate(trades: list[Trade], n_trials: int = 1, c: Criteria | None = None,
                    f"{pos_share*100:.0f}% 的期間獲利（{len(by_period)} 期，需 ≥ "
                    f"{c.min_positive_period_share*100:.0f}%）"))
 
-    by_sym: dict[str, float] = {}
-    for tr in trades:
+    # 投資組合型策略：每「筆」是整個組合的一期報酬，標的歸因由呼叫端提供
+    by_sym: dict[str, float] = dict(symbol_contrib) if symbol_contrib else {}
+    for tr in ([] if symbol_contrib else trades):
         by_sym[tr.symbol] = by_sym.get(tr.symbol, 0.0) + val(tr)
     best = max(by_sym, key=by_sym.get)
     rest = sum(v for k, v in by_sym.items() if k != best)

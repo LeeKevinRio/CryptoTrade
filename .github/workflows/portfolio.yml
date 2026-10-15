@@ -1,0 +1,59 @@
+# 投資組合型候選驗證（橫截面動能 / 資金費率套利）
+#   trigger 內容 "dev"              → 成交量前 20 名（開發輪，兩個策略、多重比較校正 24 組）
+#   trigger 內容 "holdout:<策略>"   → 成交量第 21~45 名（開發輪沒用過的幣），只驗該策略
+# 資料：data.binance.vision U 本位合約月檔（日 K + 資金費率），36 個月
+name: 投資組合候選驗證
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backtest/.portfolio-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BINANCE_API_KEY: backtest-offline
+      BINANCE_API_SECRET: backtest-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 驗證
+        run: |
+          MODE=$(cat backtest/.portfolio-trigger | tr -d '[:space:]')
+          ALL=$(python -m backtest.top_volume --top 45 --json)
+          PICK=$(python - "$ALL" "$MODE" <<'PY'
+          import json, sys
+          from backtest.candidates import EXCLUDED
+          syms = [s for s in json.loads(sys.argv[1]) if s not in EXCLUDED]
+          mode = sys.argv[2]
+          print(",".join(syms[20:] if mode.startswith("holdout:") else syms[:20]))
+          PY
+          )
+          D=$(date -u +%F); mkdir -p reports
+          if echo "$MODE" | grep -q '^holdout:'; then
+            S=${MODE#holdout:}
+            python -m backtest.portfolio --symbols "$PICK" --strategies "$S" --n-trials 1 \
+              --title "最終確認 $D — $S（開發輪沒用過的成交量 21~45 名）" --out reports/portfolio-holdout-$S-$D.md
+          else
+            python -m backtest.portfolio --symbols "$PICK" \
+              --title "開發輪 $D（成交量前 20 名）" --out reports/portfolio-dev-$D.md
+          fi
+      - name: 提交報告
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: 投資組合候選驗證報告（Actions 自動產出）"
+          git push
