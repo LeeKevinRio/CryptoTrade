@@ -1,0 +1,53 @@
+# 投資組合型候選驗證（橫截面動能 / 資金費率套利）
+# 每週可交易池＝過去 30 天成交額前 10 名（point-in-time，避免「用今天的贏家回測過去」）
+# 候選池（當前前 100 名）切兩半：A 半開發、B 半最終確認
+# 資料：data.binance.vision U 本位合約月檔（日 K + 資金費率），36 個月
+name: 投資組合候選驗證
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backtest/.portfolio-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BINANCE_API_KEY: backtest-offline
+      BINANCE_API_SECRET: backtest-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 驗證（開發半 A + 確認半 B）
+        run: |
+          # 候選池＝當前成交量前 100 名，依字母序奇偶切成互不重疊的兩半。
+          # 事先定好的選擇規則：以 A 半（開發）結果選策略 —— 過關項數多者勝，平手比 t 值；
+          # B 半（從未用於開發）只用來確認被選中的那個，n_trials=1。
+          ALL=$(python -m backtest.top_volume --top 100 --json)
+          PICK=$(python -c "import json,sys;from backtest.candidates import EXCLUDED;print(','.join(s for s in json.loads(sys.argv[1]) if s not in EXCLUDED))" "$ALL")
+          D=$(date -u +%F); mkdir -p reports
+          python -m backtest.portfolio --symbols "$PICK" --half A --top-n 10 \
+            --title "開發輪 $D（候選池 A 半，每週過去 30 天成交額前 10 名）" --out /tmp/a.md
+          python -m backtest.portfolio --symbols "$PICK" --half B --top-n 10 --n-trials 1 \
+            --title "最終確認 $D（候選池 B 半，開發輪沒用過的幣）" --out /tmp/b.md
+          { echo "> 選擇規則（跑之前定好）：只看 A 半選策略（過關項數多者，平手比 t 值），B 半只確認被選中者。"; echo;
+            cat /tmp/a.md; echo; echo "---"; echo; cat /tmp/b.md; } > reports/portfolio-pit-$D.md
+          cat reports/portfolio-pit-$D.md
+      - name: 提交報告
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: 投資組合候選驗證報告（Actions 自動產出）"
+          git push
