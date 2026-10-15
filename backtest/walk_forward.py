@@ -20,7 +20,7 @@ import itertools
 import json
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +60,7 @@ class Fold:
     chosen: dict
     train_expectancy: float
     test_pnls: list
+    test_mae: list = field(default_factory=list)   # 各筆最大逆向波動（≤0，%）
 
 
 def _combos(grid: dict | None = None) -> list[dict]:
@@ -137,13 +138,27 @@ def run_symbol(sym: str, df, sides, train_bars: int, test_bars: int,
             continue
 
         # ── 測試視窗：只用上面選出的參數，不再調整 ──
+        te_out: list = []
         te_p = fast_backtest(closes[tr_e:te_e], highs[tr_e:te_e], lows[tr_e:te_e],
-                             sides[tr_e:te_e], best, 1.0)
+                             sides[tr_e:te_e], best, 1.0, trades_out=te_out)
         folds.append(Fold(sym, tr_s, tr_e, te_e, best, best_exp,
-                          list(np.array(te_p) - FEE) if len(te_p) else []))
+                          list(np.array(te_p) - FEE) if len(te_p) else [],
+                          [t[5] for t in te_out]))
         start += test_bars
 
     return folds
+
+
+def fold_trades(folds: list[Fold], dates: dict) -> list:
+    """把各折樣本外 pnl 攤平成 validation.Trade（period = 測試窗起始月）"""
+    from backtest.validation import Trade
+    out = []
+    for f in folds:
+        idx = dates[f.symbol]
+        period = f"{idx[min(f.train_end, len(idx) - 1)]:%Y-%m}"
+        maes = f.test_mae if len(f.test_mae) == len(f.test_pnls) else [None] * len(f.test_pnls)
+        out += [Trade(f.symbol, period, float(x), m) for x, m in zip(f.test_pnls, maes)]
+    return out
 
 
 def report(folds: list[Fold], dates: dict | None = None):
@@ -212,8 +227,12 @@ def main():
     ap.add_argument("--train", type=int, default=90, help="訓練視窗天數")
     ap.add_argument("--test", type=int, default=30, help="測試視窗天數")
     ap.add_argument("--min-trades", type=int, default=20, help="訓練視窗最少交易數")
+    ap.add_argument("--dump-trades", default=None, help="輸出樣本外逐筆 CSV（供 backtest.validation）")
+    ap.add_argument("--position-pct", type=float, default=10.0, help="蒙地卡羅用倉位 %")
     ap.add_argument("--fixed", action="store_true",
                     help="不做參數選擇，每個測試窗都直接套現行 settings.yaml 參數")
+    ap.add_argument("--prior-trials", type=int, default=7680,
+                    help="--fixed 時，現行參數當初是從幾組裡挑出來的（多重比較校正）")
     args = ap.parse_args()
 
     try:
@@ -253,6 +272,21 @@ def main():
               flush=True)
 
     report(folds, dates)
+
+    # ── 上線關卡 + 槓桿蒙地卡羅 ──
+    from backtest.validation import gate, leverage_table, write_trades_csv
+    trades = fold_trades(folds, dates)
+    if args.dump_trades:
+        Path(args.dump_trades).parent.mkdir(parents=True, exist_ok=True)
+        write_trades_csv(args.dump_trades, trades)
+    if trades:
+        # --fixed 只評估 1 組，但那組本身是先前從 7,680 組掃描挑出來的 → 依實際試驗數校正
+        n_trials = len(combos) if not args.fixed else args.prior_trials
+        print()
+        print(gate(trades, n_trials).render())
+        print()
+        print(leverage_table([t.pnl_pct for t in trades], args.position_pct,
+                             mae_pct=[t.mae_pct for t in trades]))
 
 
 if __name__ == "__main__":
