@@ -689,15 +689,21 @@ class TradeOrchestrator:
             days = 30
         if days <= 0:
             return
-        from src.execution.exchange_import import import_trades
+        from src.execution.exchange_import import import_trades, mark_estimate_duplicates
         try:
-            stats = await import_trades(
-                self.api, self.tracker.session_factory, list(self.symbols), days,
-            )
-            if stats["inserted"]:
-                logger.info("📥 已從交易所回補 %d 筆歷史交易（%d 天）", stats["inserted"], days)
+            # 也要涵蓋「DB 還有 OPEN、但已掉出本次標的池」的幣，否則它們只能被對帳估算平倉
+            open_syms = {t["symbol"] for t in self.tracker.get_open_trades()}
+            syms = list(dict.fromkeys(list(self.symbols) + sorted(open_syms)))
+            stats = await import_trades(self.api, self.tracker.session_factory, syms, days)
+            if stats["inserted"] or stats.get("merged"):
+                logger.info("📥 已從交易所回補 %d 筆、結清離線平倉 %d 筆（%d 天）",
+                            stats["inserted"], stats.get("merged", 0), days)
         except Exception as e:  # noqa: BLE001 — 回補失敗不應阻斷交易
             logger.warning("交易所歷史回補失敗（不影響交易）: %s", e)
+        try:
+            mark_estimate_duplicates(self.tracker.session_factory)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("重複紀錄清理失敗（不影響交易）: %s", e)
 
     async def _load_historical_candles(self):
         failed = []
