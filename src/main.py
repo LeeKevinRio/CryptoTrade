@@ -301,6 +301,10 @@ class TradeBot:
                 self.logger.info("[%s] 已暫停進場", self.bot_id)
                 note_gate(signal.symbol, "bot 已暫停（儀表板 pause）")
                 return
+            if symbol in ((state.universe or {}).get("held_extra") or []):
+                # 掉出成交量前 N 名、只因仍有持倉才留在清單 → 照停損停利管到平倉，不再開新單
+                note_gate(signal.symbol, "已掉出成交量前 N 名（只管理既有倉位）")
+                return
             await self._handle_signal(signal)
 
     async def _handle_signal(self, signal):
@@ -573,6 +577,7 @@ class TradeOrchestrator:
 
         await self.api.connect()
         state.testnet = self.config["binance"]["testnet"]
+        await self._resolve_universe()
         if not state.testnet:
             # 真金：任何硬性檢查失敗就拒絕啟動（main 的重試迴圈會每分鐘重跑，修好即自動啟動）
             from src.execution.live_preflight import run_preflight
@@ -649,6 +654,31 @@ class TradeOrchestrator:
         # 啟動失敗後的清理不發通知，避免退避重試循環對 Telegram 洗版
         if was_running:
             await self.notifier.send("🛑 *CryptoTrade 已停止*")
+
+    async def _resolve_universe(self):
+        """trading.auto_top_volume: N → 以當下合約 24h 成交額前 N 名取代寫死的 symbols。
+        抓取失敗就沿用 settings.yaml 的清單（不阻斷啟動）；持倉中的標的一律保留。"""
+        n = int(self.config.get("trading", {}).get("auto_top_volume") or 0)
+        if n <= 0:
+            state.universe = {"source": "settings.yaml", "symbols": list(self.symbols)}
+            return
+        from src.data.universe import merge_with_held, top_volume_symbols
+        try:
+            top = await top_volume_symbols(self.api, n)
+            if not top:
+                raise RuntimeError("成交量排名為空")
+            held = [p["symbol"] for p in await self.api.get_open_positions()]
+            merged, extra = merge_with_held(top, held)
+            # 就地修改：bots 在建構時持有同一個 list 參照
+            self.symbols[:] = merged
+            state.universe = {"source": f"auto_top_volume={n}", "symbols": list(merged),
+                              "held_extra": extra, "error": None}
+            logger.info("📊 標的池：合約成交額前 %d 名 %s%s", n, top,
+                        f"＋持倉中 {extra}" if extra else "")
+        except Exception as e:  # noqa: BLE001 — 抓不到排名不該讓 bot 起不來
+            state.universe = {"source": "settings.yaml（自動選股失敗）", "symbols": list(self.symbols),
+                              "error": str(e)}
+            logger.warning("自動選股失敗，沿用設定檔清單 %s: %s", self.symbols, e)
 
     async def _import_exchange_history(self):
         """啟動時從交易所回補成交紀錄 —— 資料庫歸零 / 本地雲端切換後績效不斷層"""
