@@ -118,6 +118,82 @@ class TestImportDedupe(unittest.TestCase):
         self.assertEqual(len(stats["errors"]), 1)
 
 
+
+class TestOfflineCloseNotDoubleCounted(unittest.TestCase):
+    """引擎離線時被交易所停損：匯入要結清 bot 的 OPEN，而不是另插一筆（否則對帳會再估算一次）"""
+
+    def setUp(self):
+        self.sf = init_db("sqlite:///:memory:")
+        self.fills = [fill(1, "BUY", 1.0, 100), fill(2, "SELL", 1.0, 95, pnl=-5)]
+        g = group_fills_into_trades(self.fills)[0]
+        with self.sf() as s:
+            s.add(TradeRecord(bot_id="futures", mode="futures", symbol="BTCUSDT", side="LONG",
+                              entry_price=100, quantity=1.0, status="OPEN",
+                              entry_time=g["entry_time"]))
+            s.commit()
+
+    def _api(self, positions):
+        return MagicMock(get_account_trades=AsyncMock(return_value=self.fills),
+                         get_open_positions=AsyncMock(return_value=positions))
+
+    def test_merges_into_open_record(self):
+        stats = asyncio.run(import_trades(self._api([]), self.sf, ["BTCUSDT"], 30))
+        self.assertEqual((stats["merged"], stats["inserted"]), (1, 0))
+        with self.sf() as s:
+            rows = s.query(TradeRecord).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].status, "CLOSED")
+            self.assertAlmostEqual(rows[0].pnl, -5)
+            self.assertAlmostEqual(rows[0].pnl_pct, -5.0)
+            self.assertIn("真實成交", rows[0].close_reason)
+
+    def test_live_position_open_record_untouched(self):
+        stats = asyncio.run(import_trades(self._api([{"symbol": "BTCUSDT"}]), self.sf, ["BTCUSDT"], 30))
+        self.assertEqual((stats["merged"], stats["inserted"]), (0, 1))
+        with self.sf() as s:
+            self.assertEqual(s.query(TradeRecord).filter_by(status="OPEN").count(), 1)
+
+    def test_rerun_after_merge_is_idempotent(self):
+        api = self._api([])
+        asyncio.run(import_trades(api, self.sf, ["BTCUSDT"], 30))
+        stats = asyncio.run(import_trades(api, self.sf, ["BTCUSDT"], 30))
+        self.assertEqual((stats["merged"], stats["inserted"], stats["skipped"]), (0, 0, 1))
+
+
+class TestMarkEstimateDuplicates(unittest.TestCase):
+    def test_marks_only_estimates_overlapping_an_import(self):
+        from datetime import datetime
+        from src.execution.exchange_import import ESTIMATE_REASON, mark_estimate_duplicates
+        sf = init_db("sqlite:///:memory:")
+        d = lambda day, h: datetime(2026, 10, day, h)
+        with sf() as s:
+            s.add_all([
+                # SUI：10/13 07:34 交易所真實停損 → 09:54 啟動又被估算平倉一次
+                TradeRecord(bot_id="futures", symbol="SUIUSDT", side="LONG", entry_price=1.08,
+                            exit_price=1.029, quantity=465, pnl=-24.7, status="CLOSED",
+                            strategy="exchange_import", close_reason=IMPORT_REASON,
+                            entry_time=d(13, 7), exit_time=d(13, 7)),
+                TradeRecord(bot_id="futures", symbol="SUIUSDT", side="LONG", entry_price=1.08,
+                            exit_price=1.034, quantity=465, pnl=-22.7, status="CLOSED",
+                            close_reason=ESTIMATE_REASON, entry_time=d(12, 1), exit_time=d(13, 9)),
+                # 沒有對應匯入的估算 → 保留
+                TradeRecord(bot_id="futures", symbol="BNBUSDT", side="LONG", entry_price=700,
+                            exit_price=690, quantity=1, pnl=-10, status="CLOSED",
+                            close_reason=ESTIMATE_REASON, entry_time=d(12, 1), exit_time=d(13, 9)),
+                # 方向不同 → 不算重複
+                TradeRecord(bot_id="futures", symbol="SUIUSDT", side="SHORT", entry_price=1.1,
+                            exit_price=1.2, quantity=1, pnl=-0.1, status="CLOSED",
+                            close_reason=ESTIMATE_REASON, entry_time=d(12, 1), exit_time=d(13, 9)),
+            ])
+            s.commit()
+        self.assertEqual(mark_estimate_duplicates(sf), 1)
+        with sf() as s:
+            dup = s.query(TradeRecord).filter_by(status="DUPLICATE").one()
+            self.assertEqual((dup.symbol, dup.side, dup.pnl), ("SUIUSDT", "LONG", -22.7))
+            self.assertEqual(s.query(TradeRecord).filter_by(status="CLOSED").count(), 3)
+        self.assertEqual(mark_estimate_duplicates(sf), 0)        # 重跑不會再動
+
+
 if __name__ == "__main__":
     unittest.main()
 

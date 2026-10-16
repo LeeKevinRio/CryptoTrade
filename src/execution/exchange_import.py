@@ -184,12 +184,81 @@ def _already_recorded(session: Session, trade: dict, tolerance_s: int = 120) -> 
     return dup is not None
 
 
+ESTIMATE_REASON = "啟動對帳：Binance 已無倉，DB 估算平倉"
+
+
+def _matching_open(session: Session, trade: dict, bot_id: str, tolerance_s: int = 120):
+    """bot 記過開倉（OPEN）、但平倉發生在引擎離線時的那筆紀錄。
+    同一 bot 同標的同時只會有一筆倉，故「開倉時間 ≤ 這筆平倉時間」的 OPEN 就是同一筆。"""
+    from datetime import timedelta
+    return (
+        session.query(TradeRecord)
+        .filter(
+            TradeRecord.bot_id == bot_id,
+            TradeRecord.symbol == trade["symbol"],
+            TradeRecord.side == trade["side"],
+            TradeRecord.status == "OPEN",
+            TradeRecord.entry_time <= trade["exit_time"] + timedelta(seconds=tolerance_s),
+        )
+        .order_by(TradeRecord.entry_time.desc())
+        .first()
+    )
+
+
+def mark_estimate_duplicates(session_factory) -> int:
+    """修正歷史重複：同一筆倉先被「交易所匯入」記成真實平倉，下次啟動又被對帳以
+    「DB 估算平倉」再記一次（2026-10 實盤 9 連敗中有 4 筆是這種重複）。
+    估算紀錄的持倉期間內若已有同標的同方向的匯入平倉 → 標記 DUPLICATE（不刪除、可追溯），
+    績效統計只看 CLOSED，因此不再重複計算。回傳標記筆數。"""
+    session: Session = session_factory()
+    n = 0
+    try:
+        estimates = (session.query(TradeRecord)
+                     .filter(TradeRecord.status == "CLOSED", TradeRecord.close_reason == ESTIMATE_REASON)
+                     .all())
+        for est in estimates:
+            if est.entry_time is None or est.exit_time is None:
+                continue
+            real = (
+                session.query(TradeRecord.id)
+                .filter(
+                    TradeRecord.id != est.id,
+                    TradeRecord.symbol == est.symbol,
+                    TradeRecord.side == est.side,
+                    TradeRecord.status == "CLOSED",
+                    TradeRecord.strategy == "exchange_import",
+                    TradeRecord.exit_time >= est.entry_time,
+                    TradeRecord.exit_time <= est.exit_time,
+                )
+                .first()
+            )
+            if real:
+                est.status = "DUPLICATE"
+                est.close_reason = f"{ESTIMATE_REASON}（與匯入紀錄 #{real[0]} 重複，已排除）"
+                n += 1
+        session.commit()
+    finally:
+        session.close()
+    if n:
+        logger.warning("🧹 已排除 %d 筆重複的估算平倉紀錄", n)
+    return n
+
+
 async def import_trades(api, session_factory, symbols: list[str], days: int,
                         bot_id: str = "futures", mode: str = "futures") -> dict:
-    """從交易所拉成交、重組、去重後寫入 DB。回傳統計。"""
+    """從交易所拉成交、重組、去重後寫入 DB。回傳統計。
+
+    若該筆平倉對得上 bot 自己的 OPEN 紀錄（引擎離線時被交易所停損／停利）→ 直接用真實
+    成交結清那筆 OPEN，而不是另插一筆；否則下次啟動對帳會再以估算價平一次，同一筆虧兩次。"""
     import time as _time
     start_ms = int(_time.time() * 1000) - days * 86_400_000
-    stats = {"symbols": 0, "fills": 0, "trades": 0, "inserted": 0, "skipped": 0, "errors": []}
+    stats = {"symbols": 0, "fills": 0, "trades": 0, "inserted": 0, "skipped": 0,
+             "merged": 0, "errors": []}
+    # 交易所目前仍有倉的標的：其 OPEN 紀錄是活的倉位，不可被歷史平倉結清
+    try:
+        live_syms = {p["symbol"] for p in await api.get_open_positions()}
+    except Exception:  # noqa: BLE001 — 查不到就保守：一律不合併
+        live_syms = None
 
     for symbol in symbols:
         try:
@@ -211,6 +280,18 @@ async def import_trades(api, session_factory, symbols: list[str], days: int,
                 if _already_recorded(session, tr):
                     stats["skipped"] += 1
                     continue
+                op = (_matching_open(session, tr, bot_id)
+                      if live_syms is not None and tr["symbol"] not in live_syms else None)
+                if op is not None:
+                    pnl_pct = (tr["pnl"] / (op.entry_price * op.quantity) * 100
+                               if op.entry_price and op.quantity else tr["pnl_pct"])
+                    op.exit_price, op.exit_time = tr["exit_price"], tr["exit_time"]
+                    op.pnl, op.pnl_pct = tr["pnl"], round(pnl_pct, 2)
+                    op.status = "CLOSED"
+                    op.close_reason = IMPORT_REASON + "（離線期間平倉，以真實成交結清）"
+                    op.exchange_ref, op.commission = tr["exchange_ref"], tr["commission"]
+                    stats["merged"] += 1
+                    continue
                 session.add(TradeRecord(
                     bot_id=bot_id, mode=mode,
                     symbol=tr["symbol"], side=tr["side"],
@@ -229,7 +310,8 @@ async def import_trades(api, session_factory, symbols: list[str], days: int,
             session.close()
 
     logger.info(
-        "交易所匯入完成：%d 標的 / %d 成交 → %d 筆交易，新增 %d、略過 %d",
-        stats["symbols"], stats["fills"], stats["trades"], stats["inserted"], stats["skipped"],
+        "交易所匯入完成：%d 標的 / %d 成交 → %d 筆交易，新增 %d、結清 OPEN %d、略過 %d",
+        stats["symbols"], stats["fills"], stats["trades"], stats["inserted"], stats["merged"],
+        stats["skipped"],
     )
     return stats
