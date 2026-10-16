@@ -214,6 +214,7 @@ def create_app(tracker=None) -> FastAPI:
                 for s, p in state.exchange_positions.items()
             },
             "adoption_log": list(state.adoption_log),
+            "universe": state.universe,
             "probes": {},
         }
         api = state.api_ref

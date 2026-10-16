@@ -49,6 +49,8 @@ class GlobalState:
     protection: dict[str, dict] = field(default_factory=dict)
     # 真金預檢結果（測試網為 None）：{"ok": bool, "balance": float, "checks": [...]}
     live_preflight: dict | None = None
+    # 本次啟動的交易標的池來源：{"source", "symbols", "held_extra", "error"}
+    universe: dict | None = None
     # 啟動接管紀錄 —— 回答「交易所有倉，為什麼 bot 沒接管」：
     # [{"ts", "symbol", "action": adopted|skipped|error|orphan_cleaned, "detail"}]
     adoption_log: list[dict] = field(default_factory=list)
