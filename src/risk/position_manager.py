@@ -196,6 +196,11 @@ class PositionManager:
 
         return actions
 
+    def note_bar_close(self, symbol: str, close_price: float):
+        """5m K 線收盤：交給停利管理器作為追蹤停利的判斷價"""
+        if symbol in self._positions:
+            self.tp_manager.note_bar_close(symbol, close_price)
+
     def get_position(self, symbol: str) -> Position | None:
         return self._positions.get(symbol)
 

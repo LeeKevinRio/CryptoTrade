@@ -40,6 +40,8 @@ class TakeProfitState:
     lowest_pnl_pct: float = 0.0         # 持倉期間最低 pnl%（通常為負）
     trailing_activation_pct: float = 1.5
     trailing_callback_pct: float = 0.5
+    # 最近一根已收盤 5m K 線的收盤價（on_bar_close 模式下，追蹤停利只拿它判斷回撤）
+    bar_close_price: float | None = None
 
     # 時間停利
     time_stop_seconds: int | None = 1800     # None / 0 = 停用時間停損
@@ -60,6 +62,10 @@ class TakeProfitManager:
         ]
         self.trailing_activation = trail_cfg.get("activation_pct", 1.5)
         self.trailing_callback = trail_cfg.get("callback_pct", 0.5)
+        # 追蹤停利只在 5m 收盤判斷回撤（與回測一致）。逐秒看即時價時，0.4% 回撤會被
+        # K 線內的雜訊頻繁觸發：實盤平均獲利 ≈0.47%，回測同參數 ≈1.13%（2026-10-18）。
+        # 最高點仍逐秒更新（≈ 回測用的 K 線高點），停損仍逐秒檢查、交易所也有停損單。
+        self.trail_on_bar_close = bool(trail_cfg.get("on_bar_close", False))
         self.time_stop = config.get("risk", {}).get("time_stop_seconds", 1800)
         self.time_stop_no_movement_pct = config.get("risk", {}).get(
             "time_stop_no_movement_pct", 0.4,
@@ -105,6 +111,11 @@ class TakeProfitManager:
         state.remaining_quantity = exchange_qty
         if grew and exchange_qty > state.total_quantity:
             state.total_quantity = exchange_qty
+
+    def note_bar_close(self, symbol: str, close_price: float):
+        state = self._states.get(symbol)
+        if state:
+            state.bar_close_price = close_price
 
     def check(self, symbol: str, current_price: float) -> list[dict]:
         """
@@ -156,9 +167,13 @@ class TakeProfitManager:
             state.trailing_active = True
             logger.info("🔄 %s 移動停利啟動 (當前 +%.2f%%)", symbol, pnl_pct)
 
+        # 收盤價每次都取走：追蹤尚未啟動時的舊收盤價不可留到啟動後才被拿來判斷
+        bar_close, state.bar_close_price = state.bar_close_price, None
         if state.trailing_active and state.remaining_quantity > 0:
-            drawdown = state.highest_pnl_pct - pnl_pct
-            if drawdown >= state.trailing_callback_pct:
+            ref = bar_close if self.trail_on_bar_close else current_price
+            drawdown = (state.highest_pnl_pct - self._calc_pnl_pct(state, ref)
+                        if ref is not None else 0.0)
+            if ref is not None and drawdown >= state.trailing_callback_pct:
                 close_qty = state.remaining_quantity
                 state.remaining_quantity = 0
                 actions.append({

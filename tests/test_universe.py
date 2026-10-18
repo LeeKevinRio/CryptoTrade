@@ -30,7 +30,7 @@ class TestRankSymbols(unittest.TestCase):
             _sym("OKUSDT"),
             _sym("USDCUSDT"),                                   # 穩定幣
             _sym("XAUTUSDT"),                                   # 黃金
-            _sym("NEWUSDT", onboardDate=NOW - 5 * 86_400_000),  # 上市 5 天
+            _sym("NEWUSDT", onboardDate=NOW - 60 * 86_400_000), # 上市 60 天（未滿 90）
             _sym("QUARTUSDT", contractType="CURRENT_QUARTER"),  # 交割合約
             _sym("BUSDT_", quoteAsset="USDC"),                  # 非 USDT 計價
             _sym("HALTUSDT", status="SETTLING"),                # 停止交易
@@ -43,6 +43,31 @@ class TestRankSymbols(unittest.TestCase):
     def test_missing_ticker_is_skipped(self):
         info = {"symbols": [_sym("A"), _sym("B")]}
         self.assertEqual(rank_symbols(info, [{"symbol": "B", "quoteVolume": "5"}], 5, NOW), ["B"])
+
+
+class TestHypeFilter(unittest.TestCase):
+    def test_thresholds(self):
+        from src.data.universe import is_hyped
+        self.assertFalse(is_hyped([100, 150]))        # +50%：正常
+        self.assertTrue(is_hyped([100, 250]))         # +150%：炒作
+        self.assertTrue(is_hyped([100, 30]))          # -70%：崩盤
+        self.assertTrue(is_hyped([100]))              # 資料不足
+
+    def test_top_volume_skips_hyped_and_backfills(self):
+        from src.data.universe import top_volume_symbols
+        info = {"symbols": [_sym("A"), _sym("QUSDT"), _sym("B"), _sym("C")]}
+        tickers = [{"symbol": s, "quoteVolume": v} for s, v in
+                   (("A", "40"), ("QUSDT", "30"), ("B", "20"), ("C", "10"))]
+        def kl(symbol, interval, limit):
+            end = "400" if symbol == "QUSDT" else "110"
+            return [[0, 0, 0, 0, "100"]] * 30 + [[0, 0, 0, 0, end]]
+        api = SimpleNamespace(client=SimpleNamespace(
+            futures_exchange_info=AsyncMock(return_value=info),
+            futures_ticker=AsyncMock(return_value=tickers),
+            futures_klines=AsyncMock(side_effect=kl)))
+        top, skipped = asyncio.run(top_volume_symbols(api, 2))
+        self.assertEqual(top, ["A", "B"])                 # Q 被剔除，由 B 遞補
+        self.assertIn("QUSDT", skipped)
 
 
 class TestMergeWithHeld(unittest.TestCase):
@@ -68,6 +93,7 @@ class TestResolveUniverse(unittest.TestCase):
             futures_ticker=AsyncMock(side_effect=RuntimeError("boom") if top_fail else None,
                                      return_value=[{"symbol": "ETHUSDT", "quoteVolume": "9"},
                                                    {"symbol": "SOLUSDT", "quoteVolume": "8"}]),
+            futures_klines=AsyncMock(return_value=[[0, 0, 0, 0, "100"]] * 31),
         )
         api.get_open_positions = AsyncMock(return_value=[{"symbol": "TAOUSDT"}])
         return api
