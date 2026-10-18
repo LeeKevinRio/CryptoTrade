@@ -664,7 +664,7 @@ class TradeOrchestrator:
             return
         from src.data.universe import merge_with_held, top_volume_symbols
         try:
-            top = await top_volume_symbols(self.api, n)
+            top, skipped = await top_volume_symbols(self.api, n)
             if not top:
                 raise RuntimeError("成交量排名為空")
             held = [p["symbol"] for p in await self.api.get_open_positions()]
@@ -672,7 +672,9 @@ class TradeOrchestrator:
             # 就地修改：bots 在建構時持有同一個 list 參照
             self.symbols[:] = merged
             state.universe = {"source": f"auto_top_volume={n}", "symbols": list(merged),
-                              "held_extra": extra, "error": None}
+                              "held_extra": extra, "skipped": skipped, "error": None}
+            if skipped:
+                logger.info("📊 排除被炒作／崩盤中的幣: %s", skipped)
             logger.info("📊 標的池：合約成交額前 %d 名 %s%s", n, top,
                         f"＋持倉中 {extra}" if extra else "")
         except Exception as e:  # noqa: BLE001 — 抓不到排名不該讓 bot 起不來
@@ -740,6 +742,10 @@ class TradeOrchestrator:
 
         if not data["is_closed"]:
             return
+
+        if interval == "5m":
+            for bot in self.bots.values():
+                bot.position_manager.note_bar_close(symbol, data["close"])
 
         candles = {}
         for tf in self.timeframes:

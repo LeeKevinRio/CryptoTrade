@@ -250,3 +250,56 @@ class TestPositionManager(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTrailingOnBarClose(unittest.TestCase):
+    """追蹤停利只在 5m 收盤判斷回撤（與回測一致）—— K 線內的雜訊不會把單洗掉"""
+
+    def _tp(self, on_bar_close=True):
+        cfg = {"risk": {**DEFAULT_CONFIG["risk"],
+                        "take_profit": {"level_1_pct": 50, "level_2_pct": 60, "level_3_pct": 70},
+                        "trailing_stop": {"activation_pct": 1.0, "callback_pct": 0.4,
+                                          "on_bar_close": on_bar_close},
+                        "time_stop_seconds": None}}
+        tp = TakeProfitManager(cfg)
+        tp.register_position("X", "LONG", 100.0, 1.0)
+        return tp
+
+    def test_intrabar_dip_does_not_exit(self):
+        tp = self._tp()
+        tp.check("X", 101.5)                     # 啟動追蹤，最高 +1.5%
+        self.assertEqual(tp.check("X", 100.9), [])  # K 線內回撤 0.6% → 不出場
+
+    def test_exit_when_bar_closes_below(self):
+        tp = self._tp()
+        tp.check("X", 101.5)
+        tp.note_bar_close("X", 101.0)            # 收盤回撤 0.5% ≥ 0.4%
+        acts = tp.check("X", 101.2)
+        self.assertEqual(len(acts), 1)
+        self.assertIn("移動停利", acts[0]["reason"])
+
+    def test_bar_close_within_callback_keeps_position(self):
+        tp = self._tp()
+        tp.check("X", 101.5)
+        tp.note_bar_close("X", 101.3)            # 收盤只回撤 0.2%
+        self.assertEqual(tp.check("X", 101.3), [])
+        self.assertEqual(tp.check("X", 100.9), [])  # 收盤價已用過，不會重複拿來判斷
+
+    def test_stale_close_before_activation_is_ignored(self):
+        """追蹤還沒啟動時收到的收盤價，不能留到啟動後才拿來判斷"""
+        tp = self._tp()
+        tp.check("X", 100.5)
+        tp.note_bar_close("X", 100.5)
+        tp.check("X", 100.6)                     # 消耗掉（尚未啟動）
+        self.assertEqual(tp.check("X", 101.5), [])  # 啟動當下不可被舊收盤價觸發
+
+    def test_legacy_tick_mode_unchanged(self):
+        tp = self._tp(on_bar_close=False)
+        tp.check("X", 101.5)
+        self.assertEqual(len(tp.check("X", 100.9)), 1)
+
+    def test_position_manager_forwards_bar_close(self):
+        cfg = {"risk": {**DEFAULT_CONFIG["risk"],
+                        "trailing_stop": {"activation_pct": 1.0, "callback_pct": 0.4, "on_bar_close": True}}}
+        pm = PositionManager(cfg)
+        pm.note_bar_close("NONE", 1.0)           # 沒倉位 → 不出錯
