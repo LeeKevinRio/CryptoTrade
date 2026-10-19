@@ -220,6 +220,25 @@ def report(folds: list[Fold], dates: dict | None = None):
             print(f"    {sym:<10} n={len(p):>5}  期望 {p.mean():+.4f}%  累計 {p.sum():+7.1f}%")
 
 
+def _crash_dump(sym, df, sides, train_bars, test_bars, combos, args):
+    """同一份進場訊號：不過濾 + 12 組大盤急跌暫停，各跑一次樣本外並存 CSV"""
+    from backtest.crash_filter import VARIANTS, apply_filter, btc_return, variant_name
+    from backtest.validation import write_trades_csv
+    btc = df["close"] if sym == "BTCUSDT" else asyncio.run(get_klines_df("BTCUSDT", "5m", args.days))["close"]
+    out = Path(args.crash_dump)
+    out.mkdir(parents=True, exist_ok=True)
+    runs = [("base", sides)]
+    rets = {h: btc_return(btc, df.index, h) for h in {v["hours"] for v in VARIANTS}}
+    for v in VARIANTS:
+        runs.append((variant_name(v), apply_filter(sides, rets[v["hours"]], v["drop"], v["both"])))
+    for name, s in runs:
+        f = run_symbol(sym, df, s, train_bars, test_bars, combos, args.min_trades)
+        tr = fold_trades(f, {sym: df.index})
+        write_trades_csv(str(out / f"crash-{name}-{sym}.csv"), tr)
+        blocked = int(np.count_nonzero(sides) - np.count_nonzero(s))
+        print(f"    [{name:<12}] 擋掉 {blocked:>4} 個訊號 → 樣本外 {len(tr)} 筆", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Walk-forward 驗證")
     ap.add_argument("--symbols", default=None, help="預設讀 settings.yaml trading.symbols")
@@ -231,6 +250,8 @@ def main():
     ap.add_argument("--position-pct", type=float, default=10.0, help="蒙地卡羅用倉位 %")
     ap.add_argument("--fixed", action="store_true",
                     help="不做參數選擇，每個測試窗都直接套現行 settings.yaml 參數")
+    ap.add_argument("--crash-dump", default=None,
+                    help="資料夾：另跑「大盤急跌暫停」12 組 + 不過濾，各存樣本外逐筆 CSV（需搭配 --fixed）")
     ap.add_argument("--prior-trials", type=int, default=7680,
                     help="--fixed 時，現行參數當初是從幾組裡挑出來的（多重比較校正）")
     args = ap.parse_args()
@@ -266,6 +287,8 @@ def main():
         print(f"  {sym}: {len(df):,} 根，計算訊號中...", flush=True)
         sides = _cached_sides(sym, df, strategy, replay)
         dates[sym] = df.index
+        if args.crash_dump:
+            _crash_dump(sym, df, sides, train_bars, test_bars, combos, args)
         f = run_symbol(sym, df, sides, train_bars, test_bars, combos, args.min_trades)
         folds += f
         print(f"    → {len(f)} folds，樣本外 {sum(len(x.test_pnls) for x in f)} 筆",

@@ -1,0 +1,80 @@
+# 大盤急跌暫停驗證：每標的一個 job（不過濾 + 12 組過濾的一年樣本外），彙整後依事先定好的規則
+# A 半選組合、B 半確認。產出 reports/crash-filter-YYYY-MM-DD.md
+name: 大盤急跌暫停驗證
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backtest/.crash-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  symbols:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.s.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: s
+        run: |
+          LIST=$(python3 -c "import re,json;t=open('backtest/.crash-trigger',encoding='utf-8').read();m=re.search(r'^symbols:\s*(.+)$',t,re.M);print(json.dumps([x.strip().upper() for x in m.group(1).split(',') if x.strip()]))")
+          echo "$LIST"
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+
+  wf:
+    needs: symbols
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: ${{ fromJSON(needs.symbols.outputs.list) }}
+    env:
+      BINANCE_API_KEY: backtest-offline
+      BINANCE_API_SECRET: backtest-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: |
+          python -m backtest.fetch_klines --symbol ${{ matrix.symbol }} --interval 5m --days 365
+          python -m backtest.fetch_klines --symbol BTCUSDT --interval 5m --days 365
+      - run: python -m backtest.walk_forward --symbols ${{ matrix.symbol }} --days 365 --fixed --crash-dump out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.symbol }}
+          path: out/*.csv
+
+  report:
+    needs: wf
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install numpy pandas
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/c
+          merge-multiple: true
+      - name: 彙整
+        run: |
+          D=$(date -u +%F); mkdir -p reports
+          python -m backtest.crash_filter --dir /tmp/c --out reports/crash-filter-$D.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: 大盤急跌暫停驗證報告（Actions 自動產出）"
+          git push
