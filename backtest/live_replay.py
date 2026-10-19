@@ -8,6 +8,7 @@
 """
 
 import argparse
+import json
 import asyncio
 import logging
 import sys
@@ -133,6 +134,8 @@ def main():
     ap.add_argument("--window", type=int, default=14, help="重播最近幾天")
     ap.add_argument("--notional", type=float, default=450.0, help="每筆名目金額 U")
     ap.add_argument("--out", default=None, help="輸出 markdown 路徑")
+    ap.add_argument("--dump", default=None, help="把逐筆交易存成 JSON（供多個 job 平行後 --combine）")
+    ap.add_argument("--combine", default=None, help="glob：合併多個 --dump 的 JSON 後輸出報告")
     args = ap.parse_args()
 
     try:
@@ -143,21 +146,44 @@ def main():
 
     cfg = load_config()
     bot_cfg = cfg["bots"]["futures"]
-    syms = ([s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-            if args.symbols else list(cfg["trading"]["symbols"]))
-
-    replay = SentimentReplay.load(days=args.window + WARMUP_DAYS + 10)
-    replay = replay if replay.available else None
-
-    all_trades: list[dict] = []
-    for sym in syms:
-        print(f"  {sym} 重播中...", flush=True)
-        t = replay_symbol(sym, bot_cfg, args.window, replay)
-        print(f"    → {len(t)} 筆", flush=True)
-        all_trades += t
-
     params, _, _ = current_params(bot_cfg)
+
+    if args.combine:
+        import glob
+        all_trades, skipped = [], []
+        for f in sorted(glob.glob(args.combine)):
+            d = json.loads(Path(f).read_text(encoding="utf-8"))
+            all_trades += [{**t, "entry": pd.Timestamp(t["entry"]), "exit": pd.Timestamp(t["exit"])}
+                           for t in d["trades"]]
+            skipped += d.get("skipped", [])
+    else:
+        syms = ([s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+                if args.symbols else list(cfg["trading"]["symbols"]))
+        replay = SentimentReplay.load(days=args.window + WARMUP_DAYS + 10)
+        replay = replay if replay.available else None
+        all_trades, skipped = [], []
+        for sym in syms:
+            print(f"  {sym} 重播中...", flush=True)
+            try:
+                t = replay_symbol(sym, bot_cfg, args.window, replay)
+            except Exception as e:  # noqa: BLE001 — 單一標的抓不到 K 線不應讓整份重播作廢
+                print(f"    → 略過：{e}", flush=True)
+                skipped.append(f"{sym}（{e}）")
+                continue
+            print(f"    → {len(t)} 筆", flush=True)
+            all_trades += t
+        if args.dump:
+            Path(args.dump).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.dump).write_text(json.dumps({
+                "trades": [{**t, "entry": t["entry"].isoformat(), "exit": t["exit"].isoformat()}
+                           for t in all_trades],
+                "skipped": skipped,
+            }), encoding="utf-8")
+            return
+
     md = render(all_trades, args.window, args.notional, params)
+    if skipped:
+        md += "\n\n略過（取不到 K 線）：" + "、".join(skipped)
     print(md)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

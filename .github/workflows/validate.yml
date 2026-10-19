@@ -23,7 +23,24 @@ jobs:
           python-version: "3.11"
       - run: pip install pyyaml
       - id: s
-        run: echo "list=$(python3 -c "import yaml,json;print(json.dumps(yaml.safe_load(open('config/settings.yaml'))['trading']['symbols']))")" >> "$GITHUB_OUTPUT"
+        # trigger 檔若有 "symbols: A,B,C" 一行就用它（例：實盤自動選出的前 20 名），否則用 settings.yaml
+        run: |
+          LIST=$(python3 - <<'PY'
+          import json, re, yaml
+          try:
+              txt = open("backtest/.validate-trigger", encoding="utf-8").read()
+          except FileNotFoundError:
+              txt = ""
+          m = re.search(r"^symbols:\s*(.+)$", txt, re.M)
+          if m:
+              syms = [x.strip().upper() for x in m.group(1).split(",") if x.strip()]
+          else:
+              syms = yaml.safe_load(open("config/settings.yaml"))["trading"]["symbols"]
+          print(json.dumps(syms))
+          PY
+          )
+          echo "$LIST"
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
 
   wf:
     needs: symbols
@@ -53,8 +70,33 @@ jobs:
           name: wf-${{ matrix.symbol }}
           path: out/*.csv
 
+  replay:
+    needs: symbols
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: ${{ fromJSON(needs.symbols.outputs.list) }}
+    env:
+      BINANCE_API_KEY: backtest-offline
+      BINANCE_API_SECRET: backtest-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 實盤期間重播（14 天，現行設定）
+        run: python -m backtest.live_replay --symbols ${{ matrix.symbol }} --window 14 --dump out/replay-${{ matrix.symbol }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: replay-${{ matrix.symbol }}
+          path: out/replay-*.json
+
   gate:
-    needs: wf
+    needs: [wf, replay]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -64,7 +106,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install numpy pyyaml
+      - run: pip install -r requirements.txt
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/wf
@@ -75,6 +117,7 @@ jobs:
           merge sel > /tmp/sel.csv; merge fix > /tmp/fix.csv
           D=$(date -u +%F); mkdir -p reports
           { echo "# 策略上線驗證 $D（一年 walk-forward 樣本外）"; echo;
+            BINANCE_API_KEY=x BINANCE_API_SECRET=x python -m backtest.live_replay --combine "/tmp/wf/replay-*.json" 2>/dev/null || echo "(重播彙整失敗)"; echo;
             echo "## 每折重選參數（36 組）"; echo '```'; python -m backtest.validation --trades /tmp/sel.csv --n-trials 36; echo '```'; echo;
             echo "## 現行固定參數（當初從 7,680 組挑出）"; echo '```'; python -m backtest.validation --trades /tmp/fix.csv --n-trials 7680; echo '```'; } > reports/validate-$D.md
           cat reports/validate-$D.md
