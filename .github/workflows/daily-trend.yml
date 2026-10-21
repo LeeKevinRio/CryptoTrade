@@ -1,0 +1,40 @@
+# 日線長期順勢驗證：BTC/ETH 開發選規則 → 8 個老牌幣確認；資料 data.binance.vision 約 7 年日 K + 資金費
+# 產出 reports/daily-trend-YYYY-MM-DD.md
+name: 日線長期順勢驗證
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backtest/.daily-trend-trigger"
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BINANCE_API_KEY: backtest-offline
+      BINANCE_API_SECRET: backtest-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 驗證
+        run: |
+          D=$(date -u +%F); mkdir -p reports
+          python -m backtest.daily_trend --months 86 --out reports/daily-trend-$D.md
+      - name: 提交報告
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add reports/
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: 日線長期順勢驗證報告（Actions 自動產出）"
+          git push

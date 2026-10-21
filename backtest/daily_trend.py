@@ -1,0 +1,180 @@
+"""日線長期順勢 —— 一年只交易十幾次、抓數個月的大行情（與先前 1h 級別的順勢不同假設）
+
+事先定好的流程（跑之前寫死，不看結果再改）：
+    規則 12 組（只用收盤價，第 t 天收盤決定、第 t+1 天起生效）：
+      donchian  收盤創 N 日新高做多（ls 模式：創 N 日新低做空）；收盤跌破 N/2 日低點出場
+                N ∈ {20, 55, 100} × 模式 {long 只做多, ls 多空}
+      sma       收盤 > N 日均線持多；ls 模式下 < 均線持空、long 模式下空手
+                N ∈ {50, 100, 200} × 模式 {long, ls}
+    成本：倉位變動扣 0.04%（單邊 taker）；持倉期間多單付、空單收資金費（官方歷史費率）
+    開發：BTC、ETH 等權組合 → 依上線關卡選組（過關項數多者，平手比 t 值）
+    確認：8 個 2019~2020 就上市的老牌幣（開發時不碰），只驗被選中的那一組（n_trials=1）
+    評估單位：組合月報酬（樣本門檻 60 個月；期間穩定看「年」）；並與買進持有比較
+
+    python -m backtest.daily_trend --out reports/daily-trend.md
+"""
+
+import argparse
+import itertools
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from backtest.validation import Criteria, Trade, gate, leverage_table
+
+FEE = 0.04 / 100
+DEV = ["BTCUSDT", "ETHUSDT"]
+HOLDOUT = ["BNBUSDT", "XRPUSDT", "ADAUSDT", "LTCUSDT", "LINKUSDT", "DOGEUSDT", "BCHUSDT", "ETCUSDT"]
+RULES = ([{"kind": "donchian", "n": n, "mode": m} for n, m in itertools.product((20, 55, 100), ("long", "ls"))]
+         + [{"kind": "sma", "n": n, "mode": m} for n, m in itertools.product((50, 100, 200), ("long", "ls"))])
+MONTHLY_CRITERIA = Criteria(min_trades=60)
+
+
+def rule_name(r: dict) -> str:
+    return f"{r['kind']}{r['n']}_{r['mode']}"
+
+
+def positions(close: pd.Series, rule: dict) -> np.ndarray:
+    """第 t 天收盤後的持倉（+1 / 0 / -1），只用 ≤ t 的收盤價"""
+    c = close.to_numpy(float)
+    n = rule["n"]
+    pos = np.zeros(len(c))
+    if rule["kind"] == "sma":
+        sma = close.rolling(n, min_periods=n).mean().to_numpy(float)
+        valid = np.isfinite(sma)
+        pos[valid & (c > sma)] = 1
+        if rule["mode"] == "ls":
+            pos[valid & (c < sma)] = -1
+        return pos
+    hi = close.rolling(n, min_periods=n).max().shift(1).to_numpy(float)
+    lo = close.rolling(n, min_periods=n).min().shift(1).to_numpy(float)
+    m = max(2, n // 2)
+    ex_lo = close.rolling(m, min_periods=m).min().shift(1).to_numpy(float)
+    ex_hi = close.rolling(m, min_periods=m).max().shift(1).to_numpy(float)
+    cur = 0
+    for t in range(len(c)):
+        if not np.isfinite(c[t]):
+            cur = 0
+        elif cur == 1 and np.isfinite(ex_lo[t]) and c[t] < ex_lo[t]:
+            cur = 0
+        elif cur == -1 and np.isfinite(ex_hi[t]) and c[t] > ex_hi[t]:
+            cur = 0
+        if cur == 0 and np.isfinite(hi[t]) and c[t] > hi[t]:
+            cur = 1
+        elif cur == 0 and rule["mode"] == "ls" and np.isfinite(lo[t]) and c[t] < lo[t]:
+            cur = -1
+        pos[t] = cur
+    return pos
+
+
+def daily_returns(close: pd.Series, funding: pd.Series, rule: dict) -> pd.Series:
+    """策略日報酬：昨天收盤的持倉 × 今天漲跌 − 換倉手續費 − 持倉資金費"""
+    pos = positions(close, rule)
+    prev = np.concatenate([[0.0], pos[:-1]])
+    ret = close.pct_change().fillna(0.0).to_numpy(float)
+    fund = funding.reindex(close.index).fillna(0.0).to_numpy(float)
+    turn = np.abs(pos - prev)
+    r = prev * ret - turn * FEE - prev * fund
+    return pd.Series(r, index=close.index)
+
+
+@dataclass
+class Result:
+    monthly: pd.Series           # 組合月報酬（小數）
+    contrib: dict                # 各幣累計貢獻（%）
+    daily: pd.Series             # 組合日報酬
+
+
+def portfolio(closes: pd.DataFrame, funding: pd.DataFrame, rule: dict | None) -> Result:
+    """等權組合；rule=None → 買進持有（同樣扣持倉資金費，對照組）"""
+    cols, rets = [], []
+    for s in closes.columns:
+        c = closes[s].dropna()
+        if len(c) < 30:
+            continue
+        f = funding[s] if s in funding else pd.Series(0.0, index=c.index)
+        if rule is None:
+            r = c.pct_change().fillna(0.0) - f.reindex(c.index).fillna(0.0)
+        else:
+            r = daily_returns(c, f, rule)
+        cols.append(s)
+        rets.append(r)
+    panel = pd.concat(rets, axis=1, keys=cols).sort_index()
+    daily = panel.mean(axis=1, skipna=True).fillna(0.0)        # 當天有資料的幣等權
+    monthly = (1 + daily).groupby(daily.index.to_period("M")).prod() - 1
+    w = panel.notna().div(panel.notna().sum(axis=1), axis=0)
+    contrib = (panel.fillna(0.0) * w).sum() * 100
+    return Result(monthly, {k: float(v) for k, v in contrib.items()}, daily)
+
+
+def _stats(res: Result) -> str:
+    m = res.monthly.to_numpy()
+    eq = np.cumprod(1 + res.daily.to_numpy())
+    dd = 1 - eq / np.maximum.accumulate(eq)
+    years = len(res.daily) / 365
+    cagr = eq[-1] ** (1 / years) - 1 if years > 0 and eq[-1] > 0 else -1
+    sharpe = m.mean() / m.std(ddof=1) * np.sqrt(12) if m.std(ddof=1) > 0 else 0
+    return (f"{len(m)} 個月 | 月勝率 {np.mean(m > 0)*100:.0f}% | 年化 {cagr*100:+.1f}% | "
+            f"最大回撤 {dd.max()*100:.1f}% | 夏普 {sharpe:.2f} | 累計 {(eq[-1]-1)*100:+.0f}%")
+
+
+def _trades(res: Result) -> list[Trade]:
+    return [Trade("PORT", str(p.year), float(r) * 100) for p, r in res.monthly.items()]
+
+
+def report(closes: pd.DataFrame, funding: pd.DataFrame) -> str:
+    dev_c, dev_f = closes[[s for s in DEV if s in closes]], funding
+    ho = [s for s in HOLDOUT if s in closes]
+    L = ["# 日線長期順勢驗證", "",
+         "事先定好的規則：只看開發組（BTC、ETH）選規則（過關項數多者，平手比 t 值）；"
+         "確認組只驗被選中者。評估單位＝組合月報酬；期間穩定看年。", "",
+         f"資料：{closes.index[0]:%Y-%m-%d} ~ {closes.index[-1]:%Y-%m-%d}", "",
+         "## 開發組（BTC、ETH）", "```",
+         f"  買進持有        {_stats(portfolio(dev_c, dev_f, None))}"]
+    scored = []
+    for r in RULES:
+        res = portfolio(dev_c, dev_f, r)
+        g = gate(_trades(res), len(RULES), MONTHLY_CRITERIA, symbol_contrib=res.contrib)
+        passes = sum(ok for _, ok, _ in g.checks)
+        scored.append((passes, g.stats.get("t", 0.0), rule_name(r), r))
+        L.append(f"  {rule_name(r):<15} {_stats(res)} | 過關 {passes}/7 | t {g.stats.get('t', 0):+.2f}")
+    L.append("```")
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best = scored[0]
+    L += ["", f"→ 開發組選出：**{best[2]}**（過關 {best[0]}/7，t {best[1]:+.2f}）", ""]
+
+    ho_c = closes[ho]
+    bh, pick = portfolio(ho_c, funding, None), portfolio(ho_c, funding, best[3])
+    g = gate(_trades(pick), 1, MONTHLY_CRITERIA, symbol_contrib=pick.contrib)
+    L += [f"## 確認組（開發時沒用過）：{' '.join(ho)}", "```",
+          f"  買進持有        {_stats(bh)}",
+          f"  {best[2]:<15} {_stats(pick)}", "", g.render(), "```", "",
+          "### 槓桿蒙地卡羅（確認組月報酬，24 個月，起始 500 U，全額倉位）", "```",
+          leverage_table(list(pick.monthly.to_numpy() * 100), 100, leverages=(1, 2, 3), n_trades=24),
+          "```"]
+    return "\n".join(L)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="日線長期順勢驗證")
+    ap.add_argument("--months", type=int, default=86)
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+    from backtest.vision_data import daily_panel
+    closes, funding, _ = daily_panel(DEV + HOLDOUT, args.months)
+    md = report(closes, funding)
+    print(md)
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(md, encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
