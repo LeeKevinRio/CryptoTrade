@@ -256,3 +256,15 @@ web:
   enabled: true
   host: 127.0.0.1               # 預設僅本機可連，要對外請改 0.0.0.0 並設定 WEB_AUTH_TOKEN
   port: 8899                    # 變更時記得同步 run_bot.bat 的重複啟動守門 port
+
+# ── 日線 50 均線、只做多、1 倍（python -m src.daily_trend_bot）──
+# 驗證：reports/daily-trend-2026-10-21.md、daily-trend-robust-2026-10-22.md
+#   主要價值是熊市少虧（2018：策略 -13% vs 持有 -71%），不是穩定獲利；最大回撤仍有 50~65%
+# 與舊的 src.main（5m 抄底）不可同時跑：同帳戶同標的會互相干擾
+daily_trend:
+  symbols: [BTCUSDT, ETHUSDT]
+  sma_days: 50
+  capital_usdt: 200             # 投入本策略的總金額（等分給各標的）；請依自己能承受跌一半的金額調整
+  leverage: 1                   # 回測只驗證過 1 倍；2 倍兩年內腰斬機率 37%
+  margin_type: ISOLATED
+  run_at_utc: "00:05"           # 日 K 於 UTC 00:00（台灣 08:00）收盤，收盤後 5 分鐘判斷
