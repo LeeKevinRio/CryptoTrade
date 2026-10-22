@@ -28,7 +28,12 @@ jobs:
       - name: 驗證
         run: |
           D=$(date -u +%F); mkdir -p reports
-          python -m backtest.daily_trend --months 86 --out reports/daily-trend-$D.md
+          if grep -q "robust" backtest/.daily-trend-trigger; then
+            # 穩健度檢查：時間留出（2017~2019 現貨）+ 均線天數敏感度，不重新選參數
+            python -m backtest.daily_trend --months 86 --robust --out reports/daily-trend-robust-$D.md
+          else
+            python -m backtest.daily_trend --months 86 --out reports/daily-trend-$D.md
+          fi
       - name: 提交報告
         run: |
           git config user.name "github-actions[bot]"

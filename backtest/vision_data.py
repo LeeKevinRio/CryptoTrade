@@ -33,7 +33,21 @@ def month_list(n: int, until: datetime | None = None) -> list[tuple[int, int]]:
     return out[::-1]
 
 
+def month_range(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    """含頭含尾的月份清單，例：(2017, 8) ~ (2019, 12)"""
+    (y, m), out = start, []
+    while (y, m) <= end:
+        out.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+SPOT_BASE = "https://data.binance.vision/data/spot/monthly"
+
+
 def _url(kind: str, sym: str, y: int, m: int) -> str:
+    if kind == "spot_klines":       # 合約上市（2019-09）之前的歷史只有現貨
+        return f"{SPOT_BASE}/klines/{sym}/1d/{sym}-1d-{y}-{m:02d}.zip"
     if kind == "klines":
         return f"{BASE}/klines/{sym}/1d/{sym}-1d-{y}-{m:02d}.zip"
     return f"{BASE}/fundingRate/{sym}/{sym}-fundingRate-{y}-{m:02d}.zip"
@@ -102,6 +116,18 @@ async def _download(symbols, months, kind, concurrency=24) -> dict[str, list[byt
         if raw:
             out[sym].append(raw)
     return out
+
+
+def spot_daily_closes(symbols: list[str], start: tuple[int, int],
+                      end: tuple[int, int]) -> pd.DataFrame:
+    """現貨日收盤價（日期 × 標的），供合約上市前的時間留出驗證；現貨沒有資金費"""
+    kl = asyncio.run(_download(symbols, month_range(start, end), "spot_klines"))
+    closes = {}
+    for sym in symbols:
+        if kl[sym]:
+            k = pd.concat([parse_klines(r) for r in kl[sym]]).sort_index()
+            closes[sym] = k["close"][~k.index.duplicated()]
+    return pd.DataFrame(closes).sort_index()
 
 
 def daily_panel(symbols: list[str], months: int = 36):

@@ -158,18 +158,59 @@ def report(closes: pd.DataFrame, funding: pd.DataFrame) -> str:
     return "\n".join(L)
 
 
+CHOSEN = {"kind": "sma", "n": 50, "mode": "long"}     # 2026-10-21 開發組選出、確認組 t=1.83 未過
+NEIGHBORS = [30, 40, 45, 50, 55, 60, 70]
+
+
+def robustness_report(closes_2020: pd.DataFrame, funding_2020: pd.DataFrame,
+                      spot_2017: pd.DataFrame) -> str:
+    """不再選參數，只檢查已選中的 sma50_long 是否穩健：
+    ① 時間留出：2017-08 ~ 2019-12 現貨（開發時完全沒用過，含 2018 年 -80% 熊市），規則不改
+    ② 參數敏感度：均線 30~70 天，若只有 50 天才好 → 巧合"""
+    L = ["# 日線 50 均線策略：穩健度檢查", "",
+         "不重新選參數；檢查 2026-10-21 選出的 sma50_long（只做多、1 倍）。", ""]
+    zero = pd.DataFrame(0.0, index=spot_2017.index, columns=spot_2017.columns)
+    bh, pick = portfolio(spot_2017, zero, None), portfolio(spot_2017, zero, CHOSEN)
+    g = gate(_trades(pick), 1, Criteria(min_trades=24), symbol_contrib=pick.contrib)
+    L += ["## ① 時間留出：2017-08 ~ 2019-12（現貨，開發時沒用過）",
+          f"標的：{' '.join(spot_2017.columns)}（各幣上市日不同，當天有資料者等權）", "```",
+          f"  買進持有        {_stats(bh)}",
+          f"  sma50_long      {_stats(pick)}", "",
+          "  逐年（組合報酬）"]
+    for y in sorted({d.year for d in pick.daily.index}):
+        sel = pick.daily.index.year == y
+        a = (1 + pick.daily[sel]).prod() - 1
+        b = (1 + bh.daily[bh.daily.index.year == y]).prod() - 1
+        L.append(f"    {y}  策略 {a*100:+7.1f}%   買進持有 {b*100:+7.1f}%")
+    L += ["", g.render(), "```", ""]
+
+    L += ["## ② 參數敏感度：均線天數 30~70（2020~2026 合約，全部 10 個幣）", "```"]
+    bh20 = portfolio(closes_2020, funding_2020, None)
+    L.append(f"  買進持有        {_stats(bh20)}")
+    for n in NEIGHBORS:
+        r = portfolio(closes_2020, funding_2020, {"kind": "sma", "n": n, "mode": "long"})
+        L.append(f"  {f'sma{n}_long':<15} {_stats(r)}")
+    L.append("```")
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description="日線長期順勢驗證")
     ap.add_argument("--months", type=int, default=86)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--robust", action="store_true", help="穩健度檢查（時間留出 + 參數敏感度），不選參數")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
-    from backtest.vision_data import daily_panel
+    from backtest.vision_data import daily_panel, spot_daily_closes
     closes, funding, _ = daily_panel(DEV + HOLDOUT, args.months)
-    md = report(closes, funding)
+    if args.robust:
+        spot = spot_daily_closes(DEV + HOLDOUT, (2017, 8), (2019, 12))
+        md = robustness_report(closes, funding, spot)
+    else:
+        md = report(closes, funding)
     print(md)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
