@@ -75,3 +75,22 @@ class TestPortfolio(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRobustness(unittest.TestCase):
+    def test_month_range(self):
+        from backtest.vision_data import month_range
+        self.assertEqual(month_range((2017, 11), (2018, 2)), [(2017, 11), (2017, 12), (2018, 1), (2018, 2)])
+
+    def test_report_runs_and_does_not_reselect(self):
+        rng = np.random.default_rng(2)
+        idx20 = pd.date_range("2020-01-01", periods=900, freq="D", tz="UTC")
+        idx17 = pd.date_range("2017-08-01", periods=880, freq="D", tz="UTC")
+        cols = ["BTCUSDT", "ETHUSDT"]
+        c20 = pd.DataFrame(100 * np.cumprod(1 + rng.normal(0, 0.03, (900, 2)), axis=0), index=idx20, columns=cols)
+        c17 = pd.DataFrame(100 * np.cumprod(1 + rng.normal(0, 0.03, (880, 2)), axis=0), index=idx17, columns=cols)
+        md = dt.robustness_report(c20, pd.DataFrame(0.0, index=idx20, columns=cols), c17)
+        self.assertIn("2018", md)
+        for n in dt.NEIGHBORS:
+            self.assertIn(f"sma{n}", md)
+        self.assertNotIn("開發組選出", md)    # 穩健度檢查不做任何選擇
