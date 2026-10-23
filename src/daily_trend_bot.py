@@ -164,17 +164,60 @@ async def amain(args):
 
     api = BinanceAPI(api_key=b["api_key"], api_secret=b["api_secret"], testnet=b["testnet"])
     await api.connect()
+    server = None
     try:
+        from src import daily_trend_web as web
+        web.STATUS.update(mode=mode, dry_run=args.dry_run, sma_days=cfg["sma_days"],
+                          capital=float(cfg["capital_usdt"]), leverage=int(cfg["leverage"]))
+        wcfg = config.get("web", {})
+        if not args.once and wcfg.get("enabled", True):
+            server = await _start_web(web.create_app(LOG_CSV), wcfg)
+        last: dict[str, dict] = {}
         while True:
             rows = await run_cycle(api, cfg, dry_run=args.dry_run)
             append_log(rows)
+            last.update({r["symbol"]: r for r in rows})
             if args.once:
                 return
             wait = seconds_until(cfg["run_at_utc"])
+            next_run = datetime.now(timezone.utc) + timedelta(seconds=wait)
+            web.STATUS["next_run"] = next_run.isoformat()
             logger.info("下次判斷：%.1f 小時後（UTC %s）", wait / 3600, cfg["run_at_utc"])
-            await asyncio.sleep(wait)
+            # 等待期間每 60 秒更新儀表板（餘額、持倉、現價離均線多遠）
+            while datetime.now(timezone.utc) < next_run:
+                try:
+                    await web.refresh(api, cfg, last)
+                except Exception as e:  # noqa: BLE001 — 儀表板更新失敗不影響交易判斷
+                    logger.warning("儀表板更新失敗: %s", e)
+                remaining = (next_run - datetime.now(timezone.utc)).total_seconds()
+                await asyncio.sleep(max(1.0, min(60.0, remaining)))
     finally:
+        if server is not None:
+            server.should_exit = True
         await api.disconnect()
+
+
+async def _start_web(app, wcfg: dict):
+    """在同一個事件迴圈裡跑儀表板；port 被占用（例如舊機器人還開著）就只記警告、不影響交易"""
+    import socket
+
+    import uvicorn
+    host, port = wcfg.get("host", "127.0.0.1"), int(wcfg.get("port", 8899))
+    # 先試綁定：uvicorn 綁定失敗會 sys.exit，會連帶把交易程式關掉
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError:
+            logger.warning("儀表板未啟動：port %d 已被占用（舊機器人是否還開著？）—— 交易判斷照常進行", port)
+            return None
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="off"))
+    task = asyncio.create_task(server.serve())
+    await asyncio.sleep(0.5)
+    if task.done():
+        logger.warning("儀表板啟動失敗（port %d 可能被占用，舊機器人是否還開著？）", port)
+        return None
+    logger.info("📊 儀表板：http://%s:%d/", host, port)
+    return server
 
 
 def main():
