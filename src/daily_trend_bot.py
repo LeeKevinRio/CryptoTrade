@@ -74,8 +74,11 @@ def symbol_filters(info: dict) -> tuple[float, float]:
 
 # ── 一次判斷 ─────────────────────────────────────────────────────────────────
 
-async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = None) -> list[dict]:
-    """對每個標的判斷並（必要時）下單；回傳每個標的的決策紀錄"""
+async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = None,
+                    allow_buy: bool = True, tracker=None) -> list[dict]:
+    """對每個標的判斷並（必要時）下單；回傳每個標的的決策紀錄。
+    allow_buy=False（儀表板按了暫停）→ 不買進新倉，但該賣照賣。
+    tracker：有給就把買進／賣出寫進資料庫（儀表板的交易紀錄與績效）。"""
     now_ms = now_ms or int(time.time() * 1000)
     symbols = cfg["symbols"]
     per_symbol = float(cfg["capital_usdt"]) / len(symbols)
@@ -99,6 +102,9 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                 # 不是本策略開的倉（例如舊機器人留下的空單／10 倍單）→ 不碰，避免誤平別人的倉
                 rec["action"] = "skip"
                 rec["note"] = f"已有非本策略的倉位（{pos['side']} {pos.get('leverage')}x），請先手動處理"
+            elif hold and not pos and not allow_buy:
+                rec["action"] = "skip"
+                rec["note"] = "已暫停（儀表板），不買進新倉"
             elif hold and not pos:
                 price = await api.get_ticker_price(sym)
                 step, min_notional = symbol_filters(await api.get_symbol_info(sym))
@@ -112,10 +118,22 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                         await api.set_margin_type(sym, cfg["margin_type"])
                         await api.set_leverage(sym, lev)
                         await api.futures_market_order(sym, "BUY", qty)
+                        if tracker is not None:
+                            tracker.record_open({"bot_id": "futures", "mode": "futures", "symbol": sym,
+                                                 "side": "LONG", "entry_price": price, "quantity": qty,
+                                                 "strategy": "sma50_long"})
             elif not hold and pos:
                 rec.update(action="sell", qty=pos["quantity"])
                 if not dry_run:
                     await api.futures_market_order(sym, "SELL", pos["quantity"], reduce_only=True)
+                    if tracker is not None:
+                        price = await api.get_ticker_price(sym)
+                        entry = float(pos["entry_price"])
+                        tracker.record_close(
+                            trade_id=None, symbol=sym, exit_price=price,
+                            pnl=round((price - entry) * pos["quantity"], 4),
+                            pnl_pct=round((price / entry - 1) * 100, 2) if entry else 0.0,
+                            bot_id="futures", reason=f"收盤跌破 {cfg['sma_days']} 日均線")
             else:
                 rec["action"] = "hold" if hold else "flat"
         except Exception as e:  # noqa: BLE001 — 單一標的失敗不影響其他標的
@@ -166,29 +184,38 @@ async def amain(args):
     await api.connect()
     server = None
     try:
-        from src import daily_trend_web as web
-        web.STATUS.update(mode=mode, dry_run=args.dry_run, sma_days=cfg["sma_days"],
-                          capital=float(cfg["capital_usdt"]), leverage=int(cfg["leverage"]))
+        from src import daily_trend_dashboard as dash
+        from src.execution.order_tracker import OrderTracker
+        from src.utils.models import init_db
+        db_url = config.get("database", {}).get("url", "sqlite:///cryptotrade.db").replace("+aiosqlite", "")
+        tracker = OrderTracker(init_db(db_url))
+        ref = dash.attach(api, cfg, tracker, b["testnet"])
         wcfg = config.get("web", {})
         if not args.once and wcfg.get("enabled", True):
-            server = await _start_web(web.create_app(LOG_CSV), wcfg)
+            # 沿用原本的儀表板（src/web/app.py + static/），不另做頁面
+            from src.web.app import create_app
+            server = await _start_web(create_app(tracker=tracker), wcfg)
         last: dict[str, dict] = {}
         while True:
-            rows = await run_cycle(api, cfg, dry_run=args.dry_run)
+            paused = dash.state.bots[dash.BOT_ID].paused
+            rows = await run_cycle(api, cfg, dry_run=args.dry_run, allow_buy=not paused,
+                                   tracker=None if args.dry_run else tracker)
             append_log(rows)
             last.update({r["symbol"]: r for r in rows})
             if args.once:
                 return
             wait = seconds_until(cfg["run_at_utc"])
             next_run = datetime.now(timezone.utc) + timedelta(seconds=wait)
-            web.STATUS["next_run"] = next_run.isoformat()
+            dash.state.engine_status["next_run"] = next_run.isoformat()
             logger.info("下次判斷：%.1f 小時後（UTC %s）", wait / 3600, cfg["run_at_utc"])
-            # 等待期間每 60 秒更新儀表板（餘額、持倉、現價離均線多遠）
+            # 等待期間每 60 秒更新儀表板（餘額、持倉、現價）；日 K 圖每 15 分鐘更新
+            tick = 0
             while datetime.now(timezone.utc) < next_run:
                 try:
-                    await web.refresh(api, cfg, last)
+                    await dash.sync(api, cfg, ref, last, refresh_candles=(tick % 15 == 0))
                 except Exception as e:  # noqa: BLE001 — 儀表板更新失敗不影響交易判斷
                     logger.warning("儀表板更新失敗: %s", e)
+                tick += 1
                 remaining = (next_run - datetime.now(timezone.utc)).total_seconds()
                 await asyncio.sleep(max(1.0, min(60.0, remaining)))
     finally:
