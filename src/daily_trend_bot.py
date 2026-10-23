@@ -9,7 +9,9 @@
 
     python -m src.daily_trend_bot --dry-run --once   # 只印出今天的判斷，不下單
     python -m src.daily_trend_bot --once             # 判斷並下單一次（可交給工作排程器每天跑）
-    python -m src.daily_trend_bot                    # 常駐：啟動先跑一次，之後每天 UTC 00:05 跑
+    python -m src.daily_trend_bot                    # 常駐：啟動先跑一次，之後每天 run_at_utc 跑
+
+錯過檢查時間（電腦沒開）不會出錯：每次啟動都會立刻補判斷一次，只是下單晚一點。
 """
 
 import argparse
