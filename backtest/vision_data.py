@@ -130,6 +130,19 @@ def spot_daily_closes(symbols: list[str], start: tuple[int, int],
     return pd.DataFrame(closes).sort_index()
 
 
+def ohlc_panels(symbols: list[str], months: list[tuple[int, int]], spot: bool = False):
+    """(開盤, 最低, 收盤) 三張 日期 × 標的 表 —— 盤中觸價類規則（緊急出場）需要最低價"""
+    kl = asyncio.run(_download(symbols, months, "spot_klines" if spot else "klines"))
+    o, lo, c = {}, {}, {}
+    for sym in symbols:
+        if kl[sym]:
+            k = pd.concat([parse_klines(r) for r in kl[sym]]).sort_index()
+            k = k[~k.index.duplicated()]
+            o[sym], lo[sym], c[sym] = k["open"], k["low"], k["close"]
+    close = pd.DataFrame(c).sort_index()
+    return (pd.DataFrame(o).reindex(close.index), pd.DataFrame(lo).reindex(close.index), close)
+
+
 def daily_panel(symbols: list[str], months: int = 36):
     """回傳 (收盤價, 每日資金費率合計, 每日成交額 USDT)，皆為 日期 × 標的；缺資料為 NaN。
 
