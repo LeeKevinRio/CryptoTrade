@@ -28,7 +28,10 @@ jobs:
       - name: 驗證
         run: |
           D=$(date -u +%F); mkdir -p reports
-          if grep -q "robust" backtest/.daily-trend-trigger; then
+          if grep -q "emergency" backtest/.daily-trend-trigger; then
+            # 緊急出場驗證：盤中暴跌先賣 6 種版本 vs 不加，開發組選、另兩組確認
+            python -m backtest.emergency_exit --out reports/emergency-exit-$D.md
+          elif grep -q "robust" backtest/.daily-trend-trigger; then
             # 穩健度檢查：時間留出（2017~2019 現貨）+ 均線天數敏感度，不重新選參數
             python -m backtest.daily_trend --months 86 --robust --out reports/daily-trend-robust-$D.md
           else
