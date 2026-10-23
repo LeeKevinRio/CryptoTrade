@@ -133,3 +133,65 @@ class TestCycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDashboard(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from src import daily_trend_web as web
+        self.web = web
+        self.dir = Path(tempfile.mkdtemp())
+        self.csv = self.dir / "daily_trend.csv"
+        bot.append_log([{"ts": "2026-10-23T14:00:05+00:00", "symbol": "BTCUSDT", "action": "flat",
+                         "close": 81384.6, "sma": 81784.5, "dry_run": False}], self.csv)
+
+    def test_refresh_and_render(self):
+        api = MagicMock()
+        api.get_open_positions = AsyncMock(return_value=[
+            {"symbol": "ETHUSDT", "side": "LONG", "quantity": 0.04, "entry_price": 2500.0,
+             "unrealized_pnl": 2.0, "leverage": 1}])
+        api.get_usdt_balance = AsyncMock(return_value=363.24)
+        api.get_ticker_price = AsyncMock(side_effect=[82000.0, 2550.0])
+        last = {"BTCUSDT": {"sma": 81784.5, "action": "flat", "ts": "2026-10-23T14:00:05+00:00"},
+                "ETHUSDT": {"sma": 2550.86, "action": "buy", "ts": "2026-10-23T14:00:05+00:00"}}
+        st = asyncio.run(self.web.refresh(api, {**CFG, "symbols": ["BTCUSDT", "ETHUSDT"]}, last))
+        btc, eth = st["rows"]
+        self.assertEqual(btc["state"], "空手")
+        self.assertAlmostEqual(btc["dist_pct"], (82000 / 81784.5 - 1) * 100)
+        self.assertEqual(eth["state"], "持有")
+        self.assertAlmostEqual(eth["upnl_pct"], 2.0)
+        self.assertFalse(eth["foreign"])
+        page = self.web.render(st, self.web.read_history(self.csv))
+        self.assertIn("BTCUSDT", page)
+        self.assertIn("空手", page)
+        self.assertIn("81,384.60", page)              # 歷史判斷
+        self.assertIn("10/23 22:00", page)            # 台灣時間
+
+    def test_taiwan_time(self):
+        self.assertEqual(self.web.tw("2026-10-23T14:00:00+00:00"), "10/23 22:00")
+
+    def test_http_endpoints_and_auth(self):
+        import os
+        from fastapi.testclient import TestClient
+        app = self.web.create_app(self.csv)
+        c = TestClient(app)
+        self.assertEqual(c.get("/").status_code, 200)
+        self.assertIn("history", c.get("/api/status").json())
+        os.environ["DASHBOARD_AUTH"], os.environ["WEB_AUTH_TOKEN"] = "true", "tok"
+        try:
+            self.assertEqual(c.get("/").status_code, 401)
+            self.assertEqual(c.get("/?token=tok").status_code, 200)
+        finally:
+            os.environ.pop("DASHBOARD_AUTH"); os.environ.pop("WEB_AUTH_TOKEN")
+
+    def test_foreign_position_flagged(self):
+        api = MagicMock()
+        api.get_open_positions = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.005, "entry_price": 82000.0,
+             "unrealized_pnl": -1.0, "leverage": 10}])
+        api.get_usdt_balance = AsyncMock(return_value=100.0)
+        api.get_ticker_price = AsyncMock(return_value=81000.0)
+        st = asyncio.run(self.web.refresh(api, {**CFG, "symbols": ["BTCUSDT"]}, {}))
+        self.assertTrue(st["rows"][0]["foreign"])
+        self.assertIn("不是本策略", self.web.render(st, []))
