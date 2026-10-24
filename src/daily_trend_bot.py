@@ -3,6 +3,8 @@
 規則（與 backtest/daily_trend.py 的 sma50_long 完全一致，驗證見 reports/daily-trend-*.md）：
     最新一根「已收盤」日 K 的收盤價 > 過去 50 根日收盤均線 → 持有多單
     否則 → 空手（不做空）
+標的：top_volume: N → 每次判斷前取「過去 30 天成交額前 N 名」（上市滿 90 天），每幣 capital_usdt / N；
+    持有中但掉出名單的幣不強制賣，跌破均線才賣（驗證見 reports/daily-trend-top10-*.md）
 
 與舊的 5m 抄底機器人（src.main）完全獨立：兩者不可同時跑（同一帳戶、同一標的會互相干擾）。
 狀態不存本機：每次都以交易所實際持倉為準，關機重開、IP 斷線都不會亂掉。
@@ -34,6 +36,8 @@ DEFAULTS = {
     "leverage": 1,
     "margin_type": "ISOLATED",
     "run_at_utc": "00:05",      # 日 K 於 UTC 00:00 收盤
+    "top_volume": 0,            # > 0 → 每次判斷前改用「過去 30 天成交額前 N 名」取代 symbols
+    "min_listed_days": 90,      # 名單只收上市滿 90 天的幣（與回測一致）
 }
 LOG_CSV = Path("logs/daily_trend.csv")
 
@@ -72,6 +76,59 @@ def symbol_filters(info: dict) -> tuple[float, float]:
     return step, min_notional
 
 
+def avg_quote_volume(klines: list[list], now_ms: int, days: int = 30) -> float:
+    """已收盤日 K 最近 days 根的平均成交額（USDT）"""
+    vols = [float(k[7]) for k in klines if int(k[6]) < now_ms and len(k) > 7][-days:]
+    return sum(vols) / len(vols) if vols else 0.0
+
+
+def own_long_symbols(positions: dict[str, dict], lev: int) -> list[str]:
+    """本策略的倉＝槓桿與設定相同的多單（舊機器人的 10 倍單、空單都不算）"""
+    return [s for s, p in positions.items() if p["side"] == "LONG" and int(p.get("leverage", lev)) == lev]
+
+
+async def resolve_symbols(api, cfg: dict, positions: dict[str, dict],
+                          now_ms: int) -> tuple[list[str], list[str], dict[str, list]]:
+    """回傳 (今天要判斷的標的, 掉出名單但持有中的標的, 已抓到的日 K)。
+    top_volume > 0：先以 24h 成交額取 3N 個候選，再用過去 30 天平均成交額排出前 N 名（與回測一致）；
+    持有中但掉出名單者照樣判斷 —— 只會在跌破均線時賣出，不會加碼。"""
+    n = int(cfg.get("top_volume") or 0)
+    held = own_long_symbols(positions, int(cfg["leverage"]))
+    base = list(cfg["symbols"])
+    cache: dict[str, list] = {}
+    if n > 0:
+        from src.data.universe import rank_symbols
+        try:
+            info = await api.client.futures_exchange_info()
+            tickers = await api.client.futures_ticker()
+            vols = []
+            for sym in rank_symbols(info, tickers, n * 3, now_ms=now_ms,
+                                    min_listed_days=int(cfg["min_listed_days"])):
+                try:
+                    cache[sym] = await api.get_klines(sym, "1d", limit=int(cfg["sma_days"]) + 5)
+                except Exception as e:  # noqa: BLE001 — 抓不到就不列入
+                    logger.warning("%s 日 K 取得失敗，不列入名單: %s", sym, e)
+                    continue
+                vols.append((sym, avg_quote_volume(cache[sym], now_ms)))
+            vols.sort(key=lambda x: x[1], reverse=True)
+            base = [s for s, _ in vols[:n]]
+            if not base:
+                raise RuntimeError("成交量排名為空")
+        except Exception as e:  # noqa: BLE001 — 排名失敗就沿用 settings 的清單，不中斷交易判斷
+            logger.warning("成交量前 %d 名取得失敗，改用設定清單 %s: %s", n, cfg["symbols"], e)
+            base = list(cfg["symbols"])
+    extra = [s for s in held if s not in base] if n > 0 else []
+    return base + extra, extra, cache
+
+
+async def available_usdt(api) -> float:
+    """合約帳戶可用餘額；查不到就回傳無限大（交給交易所判斷）"""
+    try:
+        return float((await api.client.futures_account())["availableBalance"])
+    except Exception:  # noqa: BLE001
+        return float("inf")
+
+
 # ── 一次判斷 ─────────────────────────────────────────────────────────────────
 
 async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = None,
@@ -80,15 +137,17 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
     allow_buy=False（儀表板按了暫停）→ 不買進新倉，但該賣照賣。
     tracker：有給就把買進／賣出寫進資料庫（儀表板的交易紀錄與績效）。"""
     now_ms = now_ms or int(time.time() * 1000)
-    symbols = cfg["symbols"]
-    per_symbol = float(cfg["capital_usdt"]) / len(symbols)
     lev = int(cfg["leverage"])
     positions = {p["symbol"]: p for p in await api.get_open_positions()}
+    symbols, extra, cache = await resolve_symbols(api, cfg, positions, now_ms)
+    slots = int(cfg.get("top_volume") or 0) or len(cfg["symbols"])
+    per_symbol = float(cfg["capital_usdt"]) / slots
+    avail = None
     out = []
     for sym in symbols:
         rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": sym}
         try:
-            kl = await api.get_klines(sym, "1d", limit=cfg["sma_days"] + 5)
+            kl = cache.get(sym) or await api.get_klines(sym, "1d", limit=cfg["sma_days"] + 5)
             closes = closed_closes(kl, now_ms)
             hold = should_hold(closes, cfg["sma_days"])
             sma = sum(closes[-cfg["sma_days"]:]) / cfg["sma_days"] if hold is not None else None
@@ -109,11 +168,17 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                 price = await api.get_ticker_price(sym)
                 step, min_notional = symbol_filters(await api.get_symbol_info(sym))
                 qty = floor_qty(per_symbol * lev / price, step)
+                if avail is None:
+                    avail = await available_usdt(api)
                 if qty * price < min_notional:
                     rec["action"] = "skip"
                     rec["note"] = f"金額 {per_symbol:.2f}U 低於最小下單 {min_notional}U"
+                elif qty * price / lev > avail:
+                    rec["action"] = "skip"
+                    rec["note"] = f"可用餘額 {avail:.2f}U 不足 {qty * price / lev:.2f}U"
                 else:
                     rec.update(action="buy", qty=qty, price=price)
+                    avail -= qty * price / lev
                     if not dry_run:
                         await api.set_margin_type(sym, cfg["margin_type"])
                         await api.set_leverage(sym, lev)
@@ -136,6 +201,8 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                             bot_id="futures", reason=f"收盤跌破 {cfg['sma_days']} 日均線")
             else:
                 rec["action"] = "hold" if hold else "flat"
+            if sym in extra and rec["action"] == "hold":
+                rec["note"] = f"已掉出成交量前 {cfg['top_volume']} 名：持有到跌破均線才賣"
         except Exception as e:  # noqa: BLE001 — 單一標的失敗不影響其他標的
             rec.update(action="error", note=str(e))
             logger.error("%s 判斷／下單失敗: %s", sym, e)
@@ -176,8 +243,9 @@ async def amain(args):
     if not b["testnet"] and not b.get("live_ack") and not args.dry_run:
         raise SystemExit("真金模式需設定 LIVE_TRADING_ACK=I_UNDERSTAND（或先用 --dry-run）")
     mode = "測試網" if b["testnet"] else "真金"
+    universe = f"成交量前 {cfg['top_volume']} 名（每次判斷前更新）" if int(cfg["top_volume"] or 0) > 0 else cfg["symbols"]
     logger.info("日線均線機器人（%s%s）：%s，均線 %d 天，投入 %.0fU，%dx",
-                mode, "・只看不下單" if args.dry_run else "", cfg["symbols"],
+                mode, "・只看不下單" if args.dry_run else "", universe,
                 cfg["sma_days"], float(cfg["capital_usdt"]), int(cfg["leverage"]))
 
     api = BinanceAPI(api_key=b["api_key"], api_secret=b["api_secret"], testnet=b["testnet"])
@@ -201,6 +269,9 @@ async def amain(args):
             rows = await run_cycle(api, cfg, dry_run=args.dry_run, allow_buy=not paused,
                                    tracker=None if args.dry_run else tracker)
             append_log(rows)
+            active = [r["symbol"] for r in rows] or list(cfg["symbols"])
+            dash.state.symbols = active
+            last.clear()
             last.update({r["symbol"]: r for r in rows})
             if args.once:
                 return
@@ -212,7 +283,8 @@ async def amain(args):
             tick = 0
             while datetime.now(timezone.utc) < next_run:
                 try:
-                    await dash.sync(api, cfg, ref, last, refresh_candles=(tick % 15 == 0))
+                    await dash.sync(api, {**cfg, "symbols": active}, ref, last,
+                                    refresh_candles=(tick % 15 == 0))
                 except Exception as e:  # noqa: BLE001 — 儀表板更新失敗不影響交易判斷
                     logger.warning("儀表板更新失敗: %s", e)
                 tick += 1
