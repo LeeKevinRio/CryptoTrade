@@ -133,3 +133,22 @@ class TestCycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTopNBacktest(unittest.TestCase):
+    def test_pit_universe_and_hold_outside(self):
+        import numpy as np
+        import pandas as pd
+        from backtest import daily_trend as d
+        idx = pd.date_range("2024-01-01", periods=200, freq="D", tz="UTC")
+        up = pd.Series(np.linspace(10, 30, 200), index=idx)
+        closes = pd.DataFrame({"AUSDT": up, "BUSDT": up, "CUSDT": up})
+        qvol = pd.DataFrame({"AUSDT": 3.0, "BUSDT": 2.0, "CUSDT": 1.0}, index=idx)
+        qvol.loc[idx[150]:, "AUSDT"] = 0.5                         # A 第 150 天後掉出前 2 名
+        uni = d.topn_universe(closes, qvol, top_n=2, min_age=90)
+        self.assertFalse(uni.iloc[80].any())                        # 上市未滿 90 天：不在名單
+        self.assertTrue(uni.iloc[100][["AUSDT", "BUSDT"]].all())
+        self.assertFalse(uni.iloc[100]["CUSDT"])
+        res = d.topn_sma(closes, closes * 0, uni, top_n=2)
+        self.assertEqual(res.max_held, 3)                           # A 掉出名單仍持有、C 遞補買進
+        self.assertGreater(res.daily.sum(), 0)

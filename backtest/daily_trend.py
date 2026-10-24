@@ -194,17 +194,124 @@ def robustness_report(closes_2020: pd.DataFrame, funding_2020: pd.DataFrame,
     return "\n".join(L)
 
 
+TOPN_CRITERIA = Criteria(min_trades=36)
+
+
+def topn_universe(closes: pd.DataFrame, qvol: pd.DataFrame, top_n: int,
+                  window: int = 30, min_age: int = 90) -> pd.DataFrame:
+    """第 t 天的成交量前 N 名（point-in-time）：上市滿 min_age 天者中，過去 window 天平均成交額排名"""
+    age = closes.notna().cumsum()
+    avg = qvol.rolling(window, min_periods=window).mean().where(age >= min_age)
+    return avg.rank(axis=1, ascending=False, method="first") <= top_n
+
+
+@dataclass
+class TopNResult(Result):
+    entries_per_week: float
+    avg_held: float
+    max_held: int
+
+
+def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
+             top_n: int, sma_days: int = 50) -> TopNResult:
+    """與實盤一致：每幣固定 1/top_n 資金；收盤站上均線且當天在前 N 名 → 買進；
+    已持有者不論是否掉出前 N 名，收盤跌破均線才賣（掉出名單不強制賣）"""
+    c = closes.to_numpy(float)
+    sma = closes.rolling(sma_days, min_periods=sma_days).mean().to_numpy(float)
+    u = uni.reindex_like(closes).fillna(False).to_numpy(bool)
+    T, N = c.shape
+    held = np.zeros((T, N))
+    cur = np.zeros(N)
+    entries = 0
+    for t in range(T):
+        ok = np.isfinite(c[t]) & np.isfinite(sma[t])
+        above = ok & (c[t] > sma[t])
+        cur = np.where(~np.isfinite(c[t]) | (ok & ~above), 0.0, cur)          # 跌破均線（或下市）→ 賣
+        buy = (cur == 0) & above & u[t]
+        entries += int(buy.sum())
+        cur = np.where(buy, 1.0, cur)
+        held[t] = cur
+    prev = np.vstack([np.zeros(N), held[:-1]])
+    ret = np.nan_to_num(closes.pct_change().to_numpy(float), nan=0.0, posinf=0.0, neginf=0.0)
+    fund = np.nan_to_num(funding.reindex_like(closes).to_numpy(float), nan=0.0)
+    w = 1.0 / top_n
+    per = w * (prev * ret - np.abs(held - prev) * FEE - prev * fund)
+    daily = pd.Series(per.sum(axis=1), index=closes.index)
+    monthly = (1 + daily).groupby(daily.index.to_period("M")).prod() - 1
+    contrib = {s: float(v) * 100 for s, v in zip(closes.columns, per.sum(axis=0))}
+    weeks = max(1.0, T / 7)
+    return TopNResult(monthly, contrib, daily, entries / weeks,
+                      float(held.sum(axis=1).mean()), int(held.sum(axis=1).max()))
+
+
+def topn_buy_hold(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame, top_n: int) -> Result:
+    """對照組：每天等權持有當天的前 N 名（名單變動時換倉，扣手續費與資金費）"""
+    u = uni.reindex_like(closes).fillna(False).to_numpy(float)
+    prev = np.vstack([np.zeros(u.shape[1]), u[:-1]])
+    ret = np.nan_to_num(closes.pct_change().to_numpy(float), nan=0.0, posinf=0.0, neginf=0.0)
+    fund = np.nan_to_num(funding.reindex_like(closes).to_numpy(float), nan=0.0)
+    per = (prev * ret - np.abs(u - prev) * FEE - prev * fund) / top_n
+    daily = pd.Series(per.sum(axis=1), index=closes.index)
+    monthly = (1 + daily).groupby(daily.index.to_period("M")).prod() - 1
+    return Result(monthly, {s: float(v) * 100 for s, v in zip(closes.columns, per.sum(axis=0))}, daily)
+
+
+def topn_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFrame, top_n: int) -> str:
+    """不選參數：sma50_long 原封不動，只把標的從 BTC/ETH 換成每天的成交量前 N 名"""
+    uni = topn_universe(closes, qvol, top_n)
+    start = uni.any(axis=1).idxmax()                       # 第一天有完整排名
+    closes, funding, uni = closes.loc[start:], funding.loc[start:], uni.loc[start:]
+    pick, bh = topn_sma(closes, funding, uni, top_n), topn_buy_hold(closes, funding, uni, top_n)
+    dev = [s for s in DEV if s in closes]
+    base = portfolio(closes[dev], funding, CHOSEN)
+    g = gate(_trades(pick), 1, TOPN_CRITERIA, symbol_contrib=pick.contrib)
+    top_contrib = sorted(pick.contrib.items(), key=lambda kv: kv[1], reverse=True)
+    L = [f"# 日線 50 均線 × 成交量前 {top_n} 名（point-in-time）", "",
+         f"規則不變（sma50_long、只做多、1 倍）；每天只用當時過去 30 天成交額選前 {top_n} 名（上市滿 90 天），"
+         f"每幣固定 1/{top_n} 資金；掉出名單的持倉照樣等跌破均線才賣（與實盤一致）。", "",
+         f"資料：{closes.index[0]:%Y-%m-%d} ~ {closes.index[-1]:%Y-%m-%d}；候選池 {closes.shape[1]} 個幣"
+         "（當前成交量前 100 名 → 已下市的幣不在池內，結果偏樂觀）", "", "```",
+         f"  前{top_n}名 買進持有   {_stats(bh)}",
+         f"  前{top_n}名 sma50      {_stats(pick)}",
+         f"  BTC/ETH sma50     {_stats(base)}（同期間對照）", "",
+         f"  交易頻率：平均每週買進 {pick.entries_per_week:.1f} 次；平均同時持有 {pick.avg_held:.1f} 個幣，"
+         f"最多 {pick.max_held} 個（每個 1/{top_n} 資金 → 最多需 {pick.max_held / top_n * 100:.0f}% 資金）", "",
+         "  逐年（組合報酬）"]
+    for y in sorted({d.year for d in pick.daily.index}):
+        a = (1 + pick.daily[pick.daily.index.year == y]).prod() - 1
+        b = (1 + bh.daily[bh.daily.index.year == y]).prod() - 1
+        c = (1 + base.daily[base.daily.index.year == y]).prod() - 1
+        L.append(f"    {y}  前{top_n} sma50 {a*100:+7.1f}%   前{top_n} 買進持有 {b*100:+7.1f}%   BTC/ETH sma50 {c*100:+7.1f}%")
+    L += ["", "  貢獻最多／最少的幣：" + "、".join(f"{s} {v:+.0f}%" for s, v in top_contrib[:5])
+          + " ｜ " + "、".join(f"{s} {v:+.0f}%" for s, v in top_contrib[-5:]), "", g.render(), "```"]
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description="日線長期順勢驗證")
     ap.add_argument("--months", type=int, default=86)
     ap.add_argument("--out", default=None)
     ap.add_argument("--robust", action="store_true", help="穩健度檢查（時間留出 + 參數敏感度），不選參數")
+    ap.add_argument("--top-symbols", default=None,
+                    help="逗號分隔的候選池 → 驗證「每天成交量前 N 名」版本（不選參數）")
+    ap.add_argument("--top-n", type=int, default=10)
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
     from backtest.vision_data import daily_panel, spot_daily_closes
+    if args.top_symbols:
+        syms = sorted({x.strip().upper() for x in args.top_symbols.split(",") if x.strip()} | set(DEV))
+        closes, funding, qvol = daily_panel(syms, args.months)
+        closes = closes.dropna(axis=1, how="all")
+        md = topn_report(closes, funding.reindex(columns=closes.columns),
+                         qvol.reindex(columns=closes.columns), args.top_n)
+        print(md)
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(md, encoding="utf-8")
+        return
     closes, funding, _ = daily_panel(DEV + HOLDOUT, args.months)
     if args.robust:
         spot = spot_daily_closes(DEV + HOLDOUT, (2017, 8), (2019, 12))
