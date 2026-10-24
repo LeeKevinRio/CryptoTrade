@@ -133,3 +133,89 @@ class TestCycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTopNBacktest(unittest.TestCase):
+    def test_pit_universe_and_hold_outside(self):
+        import numpy as np
+        import pandas as pd
+        from backtest import daily_trend as d
+        idx = pd.date_range("2024-01-01", periods=200, freq="D", tz="UTC")
+        up = pd.Series(np.linspace(10, 30, 200), index=idx)
+        closes = pd.DataFrame({"AUSDT": up, "BUSDT": up, "CUSDT": up})
+        qvol = pd.DataFrame({"AUSDT": 3.0, "BUSDT": 2.0, "CUSDT": 1.0}, index=idx)
+        qvol.loc[idx[150]:, "AUSDT"] = 0.5                         # A 第 150 天後掉出前 2 名
+        uni = d.topn_universe(closes, qvol, top_n=2, min_age=90)
+        self.assertFalse(uni.iloc[80].any())                        # 上市未滿 90 天：不在名單
+        self.assertTrue(uni.iloc[100][["AUSDT", "BUSDT"]].all())
+        self.assertFalse(uni.iloc[100]["CUSDT"])
+        res = d.topn_sma(closes, closes * 0, uni, top_n=2)
+        self.assertEqual(res.max_held, 3)                           # A 掉出名單仍持有、C 遞補買進
+        self.assertGreater(res.daily.sum(), 0)
+
+
+def _kl_vol(closes, qvol):
+    rows = _klines(closes, last_open=True)
+    return [r + [str(qvol)] for r in rows]
+
+
+class TestTopVolume(unittest.TestCase):
+    """top_volume: N → 每次判斷前以過去 30 天成交額選前 N 名；掉出名單的持倉只賣不買"""
+
+    def _api(self, series, positions=(), avail=1e9, fail_rank=False):
+        info = {"symbols": [{"symbol": s, "contractType": "PERPETUAL", "quoteAsset": "USDT",
+                             "status": "TRADING", "onboardDate": 0} for s in series]}
+        api = _api(closes=(10,) * 10, positions=positions)
+        api.client.futures_exchange_info = AsyncMock(side_effect=RuntimeError("down") if fail_rank else None,
+                                                     return_value=info)
+        api.client.futures_ticker = AsyncMock(return_value=[{"symbol": s, "quoteVolume": "1"} for s in series])
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": str(avail)})
+        api.get_klines = AsyncMock(side_effect=lambda sym, *_a, **_k: _kl_vol(*series[sym]))
+        return api
+
+    UP, DOWN = (10, 10, 10, 10, 12, 1), (10, 10, 10, 10, 8, 1)
+
+    def test_ranks_by_30d_volume_and_buys_top(self):
+        series = {"AUSDT": (self.UP, 5), "BUSDT": (self.UP, 9), "CUSDT": (self.UP, 1)}
+        cfg = {**CFG, "top_volume": 2, "capital_usdt": 200.0}
+        api = self._api(series)
+        rows = asyncio.run(bot.run_cycle(api, cfg, now_ms=NOW))
+        self.assertEqual([r["symbol"] for r in rows], ["BUSDT", "AUSDT"])
+        self.assertTrue(all(r["action"] == "buy" for r in rows))
+        self.assertAlmostEqual(rows[0]["qty"], 1.0)                 # 200U / 2 名 / 價格 100
+
+    def test_held_outside_top_is_sold_not_bought(self):
+        series = {"AUSDT": (self.UP, 5), "BUSDT": (self.UP, 9), "CUSDT": (self.DOWN, 1)}
+        pos = [{"symbol": "CUSDT", "side": "LONG", "quantity": 3, "entry_price": 9, "leverage": 1},
+               {"symbol": "SOLUSDT", "side": "LONG", "quantity": 3, "entry_price": 9, "leverage": 10}]
+        api = self._api(series, positions=pos)
+        rows = {r["symbol"]: r for r in asyncio.run(bot.run_cycle(api, {**CFG, "top_volume": 2}, now_ms=NOW))}
+        self.assertEqual(rows["CUSDT"]["action"], "sell")           # 掉出名單、跌破均線 → 賣
+        self.assertNotIn("SOLUSDT", rows)                           # 舊機器人的 10 倍單不碰
+
+    def test_held_outside_top_keeps_holding_above_sma(self):
+        series = {"AUSDT": (self.UP, 5), "BUSDT": (self.UP, 9), "CUSDT": (self.UP, 1)}
+        pos = [{"symbol": "CUSDT", "side": "LONG", "quantity": 3, "entry_price": 9, "leverage": 1}]
+        api = self._api(series, positions=pos)
+        rows = {r["symbol"]: r for r in asyncio.run(bot.run_cycle(api, {**CFG, "top_volume": 2}, now_ms=NOW))}
+        self.assertEqual(rows["CUSDT"]["action"], "hold")
+        self.assertIn("掉出", rows["CUSDT"]["note"])
+
+    def test_insufficient_balance_skips(self):
+        series = {"AUSDT": (self.UP, 5), "BUSDT": (self.UP, 9)}
+        api = self._api(series, avail=150)
+        rows = asyncio.run(bot.run_cycle(api, {**CFG, "top_volume": 2, "capital_usdt": 200.0}, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["buy", "skip"])   # 第二個只剩 50U
+        self.assertIn("可用餘額", rows[1]["note"])
+        api.futures_market_order.assert_awaited_once()
+
+    def test_rank_failure_falls_back_to_symbols(self):
+        api = self._api({"AUSDT": (self.UP, 5)}, fail_rank=True)
+        api.get_klines = AsyncMock(return_value=_kl_vol(self.UP, 1))
+        rows = asyncio.run(bot.run_cycle(api, {**CFG, "top_volume": 2, "symbols": ["BTCUSDT"]}, now_ms=NOW))
+        self.assertEqual([r["symbol"] for r in rows], ["BTCUSDT"])
+
+    def test_avg_quote_volume_ignores_unclosed(self):
+        rows = _kl_vol((1, 1, 1), 10)
+        rows[-1][7] = "1000000"                                     # 今天未收盤的不算
+        self.assertEqual(bot.avg_quote_volume(rows, NOW), 10.0)

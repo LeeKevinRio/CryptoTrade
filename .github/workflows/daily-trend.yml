@@ -14,7 +14,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       BINANCE_API_KEY: backtest-offline
       BINANCE_API_SECRET: backtest-offline
@@ -28,7 +28,12 @@ jobs:
       - name: 驗證
         run: |
           D=$(date -u +%F); mkdir -p reports
-          if grep -q "emergency" backtest/.daily-trend-trigger; then
+          if grep -q "top" backtest/.daily-trend-trigger; then
+            # 成交量前 10 名版本：規則不變，每天用當時過去 30 天成交額選前 10 名（point-in-time）
+            ALL=$(python -m backtest.top_volume --top 100 --json)
+            PICK=$(python -c "import json,sys;from backtest.candidates import EXCLUDED;print(','.join(s for s in json.loads(sys.argv[1]) if s not in EXCLUDED))" "$ALL")
+            python -m backtest.daily_trend --months 72 --top-symbols "$PICK" --top-n 10 --out reports/daily-trend-top10-$D.md
+          elif grep -q "emergency" backtest/.daily-trend-trigger; then
             # 緊急出場驗證：盤中暴跌先賣 6 種版本 vs 不加，開發組選、另兩組確認
             python -m backtest.emergency_exit --out reports/emergency-exit-$D.md
           elif grep -q "robust" backtest/.daily-trend-trigger; then

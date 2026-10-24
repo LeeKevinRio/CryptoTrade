@@ -74,7 +74,7 @@ class DailyTrendRef:
     def __init__(self, api, cfg: dict, tracker):
         self.config = {"strategy": {}}
         self.candle_manager = CandleManager()
-        self.position_manager = _PositionManager(len(cfg["symbols"]))
+        self.position_manager = _PositionManager(int(cfg.get("top_volume") or 0) or len(cfg["symbols"]))
         self.executor = _Executor(api, tracker)
 
     async def force_trade(self, symbol, side):
