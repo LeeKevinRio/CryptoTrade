@@ -131,3 +131,38 @@ class TestReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAccountTradesClock(unittest.TestCase):
+    """本機時鐘比幣安快時，查詢的 startTime 不能落在伺服器的未來（-4181）"""
+
+    def test_windows_never_start_after_server_now(self):
+        import time as _t
+        from src.data.binance_client import BinanceAPI
+        api = BinanceAPI("k", "s", testnet=True)
+        api.client = mock.MagicMock()
+        api.client.timestamp_offset = -3000                      # 本機比伺服器快 3 秒
+        api.client.futures_account_trades = mock.AsyncMock(return_value=[])
+        local_now = int(_t.time() * 1000)
+        asyncio.run(api.get_account_trades("BTCUSDT", local_now - 7 * DAY))
+        calls = api.client.futures_account_trades.await_args_list
+        self.assertEqual(len(calls), 1)                          # 剛好 7 天 → 一段就好
+        for c in calls:
+            self.assertLessEqual(c.kwargs["startTime"], local_now - 3000)
+            self.assertLessEqual(c.kwargs["endTime"], int(_t.time() * 1000) - 3000)
+
+    def test_audit_survives_symbol_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            api = mock.MagicMock()
+            api.connect = mock.AsyncMock()
+            api.disconnect = mock.AsyncMock()
+            api.client.futures_income_history = mock.AsyncMock(return_value=[
+                {"symbol": "XUSDT", "incomeType": "COMMISSION", "income": "-0.1", "time": T0}])
+            api.get_klines = mock.AsyncMock(return_value=KL)
+            api.get_account_trades = mock.AsyncMock(side_effect=RuntimeError("APIError(code=-4181)"))
+            cfg = {"binance": {"api_key": "k", "api_secret": "s", "testnet": False}, "daily_trend": {}}
+            with mock.patch("src.data.binance_client.BinanceAPI", return_value=api), \
+                 mock.patch("src.utils.config.load_config", return_value=cfg), \
+                 mock.patch("builtins.print") as pr:
+                asyncio.run(sa.amain(7, Path(d) / "none.csv"))
+        self.assertIn("XUSDT 查詢失敗", pr.call_args_list[0].args[0])
