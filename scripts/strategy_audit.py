@@ -162,15 +162,19 @@ async def amain(days: int, log_path: Path):
         from scripts.account_check import _income
         traded = {r["symbol"] for r in await _income(api, since) if r.get("incomeType") == "COMMISSION" and r.get("symbol")}
         symbols = sorted({r["symbol"] for r in log_rows} | traded)
-        klines, orders = {}, []
+        klines, orders, failed = {}, [], {}
         for sym in symbols:
-            klines[sym] = await api.get_klines(sym, "1d", limit=min(1500, days + sma_days + 5))
-            orders += group_fills(await api.get_account_trades(sym, since))
+            try:
+                klines[sym] = await api.get_klines(sym, "1d", limit=min(1500, days + sma_days + 5))
+                orders += group_fills(await api.get_account_trades(sym, since))
+            except Exception as e:  # noqa: BLE001 — 單一標的查詢失敗不中斷整份稽核
+                failed[sym] = str(e)
     finally:
         await api.disconnect()
     orders.sort(key=lambda o: o["time"])
 
     L = [f"=== 策略稽核：近 {days} 天（{datetime.now(TW):%Y-%m-%d %H:%M} 台灣時間）===", ""]
+    L += [f"⚠ {s} 查詢失敗（這個幣的結果不完整）：{e}" for s, e in failed.items()] + ([""] if failed else [])
     if not log_rows:
         L += [f"⚠ 找不到機器人的判斷紀錄 {log_path}（請在專案資料夾執行；只看模式的紀錄不算）", ""]
 

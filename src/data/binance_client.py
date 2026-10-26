@@ -362,11 +362,14 @@ class BinanceAPI:
         這裡自動切視窗與翻頁。
         """
         import time as _time
-        end_ms = end_ms or int(_time.time() * 1000)
+        # 用幣安伺服器時間當「現在」：本機時鐘若比伺服器快，最後一段視窗的 startTime
+        # 會落在伺服器的未來 → -4181 Invalid start time（2026-10-26 使用者電腦實際發生）
+        server_now = int(_time.time() * 1000) + int(getattr(self.client, "timestamp_offset", 0) or 0)
+        end_ms = min(end_ms or server_now, server_now)
         window = 7 * 86_400_000 - 1
         out: list[dict] = []
         cursor = start_ms
-        while cursor < end_ms:
+        while cursor < end_ms - 1000:            # 不足 1 秒的尾段不查（不會有成交，且最容易超過伺服器時間）
             win_end = min(cursor + window, end_ms)
             from_id = None
             while True:
