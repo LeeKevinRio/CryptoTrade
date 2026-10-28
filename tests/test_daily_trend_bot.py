@@ -219,3 +219,34 @@ class TestTopVolume(unittest.TestCase):
         rows = _kl_vol((1, 1, 1), 10)
         rows[-1][7] = "1000000"                                     # 今天未收盤的不算
         self.assertEqual(bot.avg_quote_volume(rows, NOW), 10.0)
+
+
+class TestConnectRetry(unittest.TestCase):
+    """2026-10-28：使用者電腦 DNS 卡住，api.connect() 一直沒回應 → 要逾時重試，不能卡死或直接停"""
+
+    def _api(self, outcomes):
+        api = MagicMock()
+        api.client = None
+        calls = iter(outcomes)
+
+        async def connect():
+            api.client = MagicMock(close_connection=AsyncMock())
+            what = next(calls)
+            if what == "hang":
+                await asyncio.sleep(10)
+            elif what == "fail":
+                raise OSError("dns")
+        api.connect = connect
+        return api
+
+    def test_hang_then_success(self):
+        api = self._api(["hang", "fail", "ok"])
+        asyncio.run(bot.connect_with_retry(api, timeout=0.05, wait=0))
+        self.assertIsNotNone(api.client)
+
+    def test_once_gives_up(self):
+        api = self._api(["hang"])
+        with self.assertRaises(SystemExit) as cm:
+            asyncio.run(bot.connect_with_retry(api, attempts=1, timeout=0.05, wait=0))
+        self.assertIn("逾時", str(cm.exception))
+        self.assertIsNone(api.client)                              # 卡住的連線有關掉
