@@ -249,7 +249,7 @@ async def amain(args):
                 cfg["sma_days"], float(cfg["capital_usdt"]), int(cfg["leverage"]))
 
     api = BinanceAPI(api_key=b["api_key"], api_secret=b["api_secret"], testnet=b["testnet"])
-    await api.connect()
+    await connect_with_retry(api, attempts=1 if args.once else None)
     server = None
     try:
         from src import daily_trend_dashboard as dash
@@ -266,8 +266,18 @@ async def amain(args):
         last: dict[str, dict] = {}
         while True:
             paused = dash.state.bots[dash.BOT_ID].paused
-            rows = await run_cycle(api, cfg, dry_run=args.dry_run, allow_buy=not paused,
-                                   tracker=None if args.dry_run else tracker)
+            try:
+                rows = await asyncio.wait_for(
+                    run_cycle(api, cfg, dry_run=args.dry_run, allow_buy=not paused,
+                              tracker=None if args.dry_run else tracker), CYCLE_TIMEOUT_S)
+            except Exception as e:  # noqa: BLE001 — 網路斷線等：5 分鐘後重試，不要等到明天
+                if args.once:
+                    raise
+                logger.error("這次判斷失敗（%s），%d 分鐘後重試", e or type(e).__name__, RETRY_CYCLE_S // 60)
+                dash.state.engine_status["error"] = f"判斷失敗，{RETRY_CYCLE_S // 60} 分鐘後重試：{e}"
+                await asyncio.sleep(RETRY_CYCLE_S)
+                continue
+            dash.state.engine_status["error"] = None
             append_log(rows)
             active = [r["symbol"] for r in rows] or list(cfg["symbols"])
             dash.state.symbols = active
@@ -283,10 +293,10 @@ async def amain(args):
             tick = 0
             while datetime.now(timezone.utc) < next_run:
                 try:
-                    await dash.sync(api, {**cfg, "symbols": active}, ref, last,
-                                    refresh_candles=(tick % 15 == 0))
-                except Exception as e:  # noqa: BLE001 — 儀表板更新失敗不影響交易判斷
-                    logger.warning("儀表板更新失敗: %s", e)
+                    await asyncio.wait_for(dash.sync(api, {**cfg, "symbols": active}, ref, last,
+                                                     refresh_candles=(tick % 15 == 0)), 50)
+                except Exception as e:  # noqa: BLE001 — 儀表板更新失敗（含網路卡住逾時）不影響交易判斷
+                    logger.warning("儀表板更新失敗: %s", e or type(e).__name__)
                 tick += 1
                 remaining = (next_run - datetime.now(timezone.utc)).total_seconds()
                 await asyncio.sleep(max(1.0, min(60.0, remaining)))
@@ -294,6 +304,35 @@ async def amain(args):
         if server is not None:
             server.should_exit = True
         await api.disconnect()
+
+
+CONNECT_TIMEOUT_S = 30
+RETRY_CONNECT_S = 60
+CYCLE_TIMEOUT_S = 600
+RETRY_CYCLE_S = 300
+
+
+async def connect_with_retry(api, attempts: int | None = None, timeout: float = CONNECT_TIMEOUT_S,
+                             wait: float = RETRY_CONNECT_S):
+    """連幣安：逾時（例如 DNS 卡住）或失敗就等一下再試；attempts=None 表示一直試到成功"""
+    n = 0
+    while True:
+        n += 1
+        try:
+            await asyncio.wait_for(api.connect(), timeout)
+            return
+        except Exception as e:  # noqa: BLE001 — asyncio.TimeoutError 也在這裡
+            if api.client is not None:                   # 逾時被取消時 connect() 來不及自己關
+                try:
+                    await api.client.close_connection()
+                except Exception:  # noqa: BLE001
+                    pass
+                api.client = None
+            reason = "逾時（網路或 DNS 沒有回應）" if isinstance(e, asyncio.TimeoutError) else str(e)
+            if attempts is not None and n >= attempts:
+                raise SystemExit(f"連不上幣安：{reason}")
+            logger.warning("連不上幣安：%s —— %d 秒後重試（第 %d 次）", reason, int(wait), n)
+            await asyncio.sleep(wait)
 
 
 async def _start_web(app, wcfg: dict):
