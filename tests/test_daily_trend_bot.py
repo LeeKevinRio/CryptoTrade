@@ -250,3 +250,17 @@ class TestConnectRetry(unittest.TestCase):
             asyncio.run(bot.connect_with_retry(api, attempts=1, timeout=0.05, wait=0))
         self.assertIn("逾時", str(cm.exception))
         self.assertIsNone(api.client)                              # 卡住的連線有關掉
+
+
+class TestFitQty(unittest.TestCase):
+    """2026-10-29：預算 20U 實際只下 15~16U —— 整顆步進的幣被無條件捨去"""
+
+    def test_rounds_to_nearest_within_cap(self):
+        self.assertEqual(bot.fit_qty(20, 5.3, 1), 4)            # 3 顆 15.9U → 4 顆 21.2U 較接近
+        self.assertEqual(bot.fit_qty(20, 4.636, 1), 4)          # 18.5U vs 23.2U → 4 顆
+        self.assertEqual(bot.fit_qty(20, 0.4747, 1), 42)        # 19.94U
+        self.assertEqual(bot.fit_qty(20, 0.12345, 0.001), 162.009)
+
+    def test_never_over_cap(self):
+        self.assertEqual(bot.fit_qty(20, 9, 1), 2)              # 3 顆 27U 超過 25U 上限 → 2 顆 18U
+        self.assertEqual(bot.fit_qty(20, 30, 1), 0)             # 一顆就超過上限 → 0（之後會因低於最小下單被跳過）
