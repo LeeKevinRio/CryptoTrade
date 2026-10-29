@@ -65,6 +65,16 @@ def floor_qty(qty: float, step: float) -> float:
     return round(n * step, decimals)
 
 
+def fit_qty(budget: float, price: float, step: float, max_over: float = 1.25) -> float:
+    """買進數量：往下取與往上取步進單位，選名目最接近預算者（往上最多超出預算 25%）。
+    只會無條件捨去時，一次只能買整顆的幣（步進 1）常只用到預算的 75~80%"""
+    lo = floor_qty(budget / price, step)
+    hi = floor_qty(lo + step, step) if step > 0 else lo
+    if hi * price <= budget * max_over and abs(hi * price - budget) < abs(lo * price - budget):
+        return hi
+    return lo
+
+
 def symbol_filters(info: dict) -> tuple[float, float]:
     """(數量步進, 最小名目 USDT)"""
     step, min_notional = 0.001, 5.0
@@ -167,7 +177,7 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
             elif hold and not pos:
                 price = await api.get_ticker_price(sym)
                 step, min_notional = symbol_filters(await api.get_symbol_info(sym))
-                qty = floor_qty(per_symbol * lev / price, step)
+                qty = fit_qty(per_symbol * lev, price, step)
                 if avail is None:
                     avail = await available_usdt(api)
                 if qty * price < min_notional:
