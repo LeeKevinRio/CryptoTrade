@@ -264,3 +264,26 @@ class TestFitQty(unittest.TestCase):
     def test_never_over_cap(self):
         self.assertEqual(bot.fit_qty(20, 9, 1), 2)              # 3 顆 27U 超過 25U 上限 → 2 顆 18U
         self.assertEqual(bot.fit_qty(20, 30, 1), 0)             # 一顆就超過上限 → 0（之後會因低於最小下單被跳過）
+
+
+class TestTopNLongShort(unittest.TestCase):
+    def test_short_below_sma_and_cover_on_reclaim(self):
+        import numpy as np
+        import pandas as pd
+        from backtest import daily_trend as d
+        idx = pd.date_range("2024-01-01", periods=200, freq="D", tz="UTC")
+        down = pd.Series(np.linspace(30, 10, 200), index=idx)
+        closes = pd.DataFrame({"AUSDT": down})
+        qvol = pd.DataFrame({"AUSDT": 1.0}, index=idx)
+        uni = d.topn_universe(closes, qvol, top_n=1, min_age=90)
+        lo = d.topn_sma(closes, closes * 0, uni, top_n=1, mode="long")
+        ls = d.topn_sma(closes, closes * 0, uni, top_n=1, mode="ls")
+        self.assertAlmostEqual(lo.daily.sum(), 0.0)                 # 一路跌：只做多完全空手
+        self.assertGreater(ls.daily.sum(), 0)                       # 多空版做空賺錢
+        self.assertEqual(ls.short_trades, 1)
+        self.assertLess(ls.long_pct, 1e-9)
+        self.assertGreater(ls.short_pct, 0)
+        # 先跌、某天一根暴漲到進場價 1.5 倍以上 → 當天收盤站回均線回補，記錄為被軋 50% 以上
+        squeeze = pd.Series(np.r_[np.linspace(30, 10, 150), np.full(50, 40.0)], index=idx)
+        sq = d.topn_sma(pd.DataFrame({"AUSDT": squeeze}), closes * 0, uni, top_n=1, mode="ls")
+        self.assertGreaterEqual(sq.short_up50, 1)
