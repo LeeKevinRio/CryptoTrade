@@ -210,12 +210,18 @@ class TopNResult(Result):
     entries_per_week: float
     avg_held: float
     max_held: int
+    long_pct: float = 0.0             # 多單合計貢獻（%）
+    short_pct: float = 0.0            # 空單合計貢獻（%）
+    short_trades: int = 0
+    short_up50: int = 0               # 空單期間收盤曾比進場價高 50% 以上的次數
+    short_up90: int = 0               # 高 90% 以上（1 倍逐倉空單約在此被強平；只看收盤，盤中更早）
 
 
 def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
-             top_n: int, sma_days: int = 50) -> TopNResult:
+             top_n: int, sma_days: int = 50, mode: str = "long") -> TopNResult:
     """與實盤一致：每幣固定 1/top_n 資金；收盤站上均線且當天在前 N 名 → 買進；
-    已持有者不論是否掉出前 N 名，收盤跌破均線才賣（掉出名單不強制賣）"""
+    已持有者不論是否掉出前 N 名，收盤跌破均線才賣（掉出名單不強制賣）。
+    mode="ls"：另外在收盤跌破均線且當天在前 N 名時做空，收盤站回均線才回補（同日可多翻空）"""
     c = closes.to_numpy(float)
     sma = closes.rolling(sma_days, min_periods=sma_days).mean().to_numpy(float)
     u = uni.reindex_like(closes).fillna(False).to_numpy(bool)
@@ -223,14 +229,34 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     held = np.zeros((T, N))
     cur = np.zeros(N)
     entries = 0
+    entry_px = np.full(N, np.nan)
+    worst = np.zeros(N)
+    shorts = up50 = up90 = 0
     for t in range(T):
-        ok = np.isfinite(c[t]) & np.isfinite(sma[t])
+        fin = np.isfinite(c[t])
+        ok = fin & np.isfinite(sma[t])
         above = ok & (c[t] > sma[t])
-        cur = np.where(~np.isfinite(c[t]) | (ok & ~above), 0.0, cur)          # 跌破均線（或下市）→ 賣
+        below = ok & (c[t] < sma[t])
+        if mode == "ls":
+            sh = (cur == -1) & fin
+            worst[sh] = np.maximum(worst[sh], c[t][sh] / entry_px[sh])
+        exit_long = (cur == 1) & (~fin | (ok & ~above))                     # 跌破均線（或下市）→ 賣
+        exit_short = (cur == -1) & (~fin | (ok & ~below))                   # 站回均線（或下市）→ 回補
+        for j in np.where(exit_short)[0]:
+            up50 += worst[j] >= 1.5
+            up90 += worst[j] >= 1.9
+        cur = np.where(exit_long | exit_short, 0.0, cur)
         buy = (cur == 0) & above & u[t]
-        entries += int(buy.sum())
-        cur = np.where(buy, 1.0, cur)
+        sell = (cur == 0) & below & u[t] if mode == "ls" else np.zeros(N, bool)
+        entries += int(buy.sum()) + int(sell.sum())
+        shorts += int(sell.sum())
+        entry_px = np.where(sell, c[t], entry_px)
+        worst = np.where(sell, 1.0, worst)
+        cur = np.where(buy, 1.0, np.where(sell, -1.0, cur))
         held[t] = cur
+    for j in np.where(cur == -1)[0]:                                          # 期末仍持有的空單
+        up50 += worst[j] >= 1.5
+        up90 += worst[j] >= 1.9
     prev = np.vstack([np.zeros(N), held[:-1]])
     ret = np.nan_to_num(closes.pct_change().to_numpy(float), nan=0.0, posinf=0.0, neginf=0.0)
     fund = np.nan_to_num(funding.reindex_like(closes).to_numpy(float), nan=0.0)
@@ -240,8 +266,11 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     monthly = (1 + daily).groupby(daily.index.to_period("M")).prod() - 1
     contrib = {s: float(v) * 100 for s, v in zip(closes.columns, per.sum(axis=0))}
     weeks = max(1.0, T / 7)
-    return TopNResult(monthly, contrib, daily, entries / weeks,
-                      float(held.sum(axis=1).mean()), int(held.sum(axis=1).max()))
+    side = np.where(prev != 0, prev, held)                                    # 換倉手續費算給新方向
+    exposure = np.abs(held).sum(axis=1)
+    return TopNResult(monthly, contrib, daily, entries / weeks, float(exposure.mean()), int(exposure.max()),
+                      float(per[side > 0].sum() * 100), float(per[side < 0].sum() * 100),
+                      shorts, int(up50), int(up90))
 
 
 def topn_buy_hold(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame, top_n: int) -> Result:
@@ -287,6 +316,38 @@ def topn_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFrame,
     return "\n".join(L)
 
 
+def topn_ls_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFrame, top_n: int) -> str:
+    """事先定好：同一份 point-in-time 名單、同成本，只比「只做多」與「多空都做」；
+    多空版要上線必須：過上線關卡（n_trials=2）且年化、最大回撤、夏普都優於只做多"""
+    uni = topn_universe(closes, qvol, top_n)
+    start = uni.any(axis=1).idxmax()
+    closes, funding, uni = closes.loc[start:], funding.loc[start:], uni.loc[start:]
+    lo = topn_sma(closes, funding, uni, top_n, mode="long")
+    ls = topn_sma(closes, funding, uni, top_n, mode="ls")
+    bh = topn_buy_hold(closes, funding, uni, top_n)
+    L = [f"# 日線 50 均線 × 成交量前 {top_n} 名：只做多 vs 多空都做", "",
+         "事先定好的規則：多空版＝收盤跌破均線且當天在前 N 名 → 做空，收盤站回均線才回補（站上均線照樣做多）；"
+         f"每幣 1/{top_n} 資金、1 倍，空單照實收付資金費。要改用多空版，必須過上線關卡（2 組試驗校正）"
+         "且年化、最大回撤、夏普三項都優於只做多。", "",
+         f"資料：{closes.index[0]:%Y-%m-%d} ~ {closes.index[-1]:%Y-%m-%d}；候選池 {closes.shape[1]} 個幣"
+         "（當前成交量前 100 名 → 已下市的幣不在池內：對多單偏樂觀，對空單偏不利 —— 例如 LUNA 崩盤時的空單獲利不在內）",
+         "", "```",
+         f"  前{top_n}名 買進持有   {_stats(bh)}",
+         f"  只做多            {_stats(lo)}",
+         f"  多空都做          {_stats(ls)}", "",
+         f"  多空版拆解：多單合計 {ls.long_pct:+.0f}%、空單合計 {ls.short_pct:+.0f}%（單利加總）；"
+         f"做空 {ls.short_trades} 次，其中收盤曾比進場價高 50% 以上 {ls.short_up50} 次、高 90% 以上 {ls.short_up90} 次"
+         "（1 倍逐倉空單約在 +90~100% 被強平）",
+         f"  交易頻率：只做多每週 {lo.entries_per_week:.1f} 次、多空都做每週 {ls.entries_per_week:.1f} 次", "",
+         "  逐年（組合報酬）"]
+    for y in sorted({d.year for d in ls.daily.index}):
+        sel = ls.daily.index.year == y
+        a, b = (1 + lo.daily[sel]).prod() - 1, (1 + ls.daily[sel]).prod() - 1
+        L.append(f"    {y}  只做多 {a*100:+7.1f}%   多空都做 {b*100:+7.1f}%")
+    L += ["", "  多空都做 —— 上線關卡", gate(_trades(ls), 2, TOPN_CRITERIA, symbol_contrib=ls.contrib).render(), "```"]
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description="日線長期順勢驗證")
     ap.add_argument("--months", type=int, default=86)
@@ -295,6 +356,7 @@ def main():
     ap.add_argument("--top-symbols", default=None,
                     help="逗號分隔的候選池 → 驗證「每天成交量前 N 名」版本（不選參數）")
     ap.add_argument("--top-n", type=int, default=10)
+    ap.add_argument("--ls", action="store_true", help="與 --top-symbols 併用：比較只做多 vs 多空都做")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -305,8 +367,8 @@ def main():
         syms = sorted({x.strip().upper() for x in args.top_symbols.split(",") if x.strip()} | set(DEV))
         closes, funding, qvol = daily_panel(syms, args.months)
         closes = closes.dropna(axis=1, how="all")
-        md = topn_report(closes, funding.reindex(columns=closes.columns),
-                         qvol.reindex(columns=closes.columns), args.top_n)
+        md = (topn_ls_report if args.ls else topn_report)(
+            closes, funding.reindex(columns=closes.columns), qvol.reindex(columns=closes.columns), args.top_n)
         print(md)
         if args.out:
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
