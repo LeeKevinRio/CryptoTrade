@@ -16,7 +16,7 @@ from src.risk.position_manager import Position
 from src.web.state import BotState, state
 
 BOT_ID = "futures"          # 舊前端的分頁固定是 spot / futures
-STRATEGY = "sma50_long"
+STRATEGY = "sma50"
 
 
 class _Capital:
@@ -60,12 +60,14 @@ class _Executor:
 
     async def close_position(self, symbol: str, quantity: float, reason: str = ""):
         pos = state.bots[BOT_ID].bot_ref.position_manager.get_position(symbol)
-        await self.api.futures_market_order(symbol, "SELL", quantity, reduce_only=True)
+        short = bool(pos) and str(getattr(pos, "side", "LONG")).upper().endswith("SHORT")
+        await self.api.futures_market_order(symbol, "BUY" if short else "SELL", quantity, reduce_only=True)
         price = await self.api.get_ticker_price(symbol)
         entry = pos.entry_price if pos else price
+        sign = -1 if short else 1
         return {"symbol": symbol, "trade_id": None, "exit_price": price,
-                "pnl": round((price - entry) * quantity, 4),
-                "pnl_pct": round((price / entry - 1) * 100, 2) if entry else 0.0}
+                "pnl": round(sign * (price - entry) * quantity, 4),
+                "pnl_pct": round(sign * (price / entry - 1) * 100, 2) if entry else 0.0}
 
 
 class DailyTrendRef:
@@ -95,18 +97,22 @@ def attach(api, cfg: dict, tracker, testnet: bool) -> DailyTrendRef:
     return ref
 
 
-def signal_payload(rec: dict, sma_days: int) -> dict:
+def signal_payload(rec: dict, sma_days: int, mode: str = "long") -> dict:
     close, sma = rec.get("close"), rec.get("sma")
     dist = (close / sma - 1) * 100 if close and sma else None
     hold = dist is not None and dist > 0
+    short = mode == "ls" and dist is not None and dist < 0
     if dist is None:
         reason = rec.get("note") or "資料不足"
     elif hold:
-        reason = f"收盤 {close:,.2f} 站上 {sma_days} 日均線 {sma:,.2f}（+{dist:.2f}%）→ 持有"
+        reason = f"收盤 {close:,.6g} 站上 {sma_days} 日均線 {sma:,.6g}（+{dist:.2f}%）→ 做多"
+    elif short:
+        reason = f"收盤 {close:,.6g} 低於 {sma_days} 日均線 {sma:,.6g}（{dist:.2f}%）→ 做空，收盤站回才回補"
     else:
-        reason = f"收盤 {close:,.2f} 低於 {sma_days} 日均線 {sma:,.2f}（{dist:.2f}%）→ 空手，收盤站回才買"
-    return {"bot_id": BOT_ID, "symbol": rec["symbol"], "type": "LONG" if hold else "NEUTRAL",
-            "strength": round(dist, 2) if dist is not None else 0.0, "actionable": hold,
+        reason = f"收盤 {close:,.6g} 低於 {sma_days} 日均線 {sma:,.6g}（{dist:.2f}%）→ 空手，收盤站回才買"
+    return {"bot_id": BOT_ID, "symbol": rec["symbol"],
+            "type": "LONG" if hold else ("SHORT" if short else "NEUTRAL"),
+            "strength": round(dist, 2) if dist is not None else 0.0, "actionable": hold or short,
             "reasons": [reason] + ([rec["note"]] if rec.get("note") and dist is not None else [])}
 
 
@@ -136,5 +142,5 @@ async def sync(api, cfg: dict, ref: DailyTrendRef, last: dict[str, dict], refres
             except Exception:  # noqa: BLE001
                 pass
         if sym in last:
-            bs.last_signals[sym] = signal_payload(last[sym], int(cfg["sma_days"]))
+            bs.last_signals[sym] = signal_payload(last[sym], int(cfg["sma_days"]), cfg.get("mode", "long"))
     state.engine_status["ts"] = datetime.now(timezone.utc).isoformat()

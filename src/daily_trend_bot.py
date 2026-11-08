@@ -1,8 +1,10 @@
-"""日線 50 均線、只做多、1 倍 —— 每天日 K 收盤後判斷一次
+"""日線 50 均線、1 倍 —— 每天日 K 收盤後判斷一次
 
-規則（與 backtest/daily_trend.py 的 sma50_long 完全一致，驗證見 reports/daily-trend-*.md）：
+規則（與 backtest/daily_trend.py 的 topn_sma 一致，驗證見 reports/daily-trend-*.md）：
     最新一根「已收盤」日 K 的收盤價 > 過去 50 根日收盤均線 → 持有多單
-    否則 → 空手（不做空）
+    mode: long（只做多）→ 否則空手
+    mode: ls（多空都做）→ 收盤 < 均線持有空單；穿越均線當天先平倉再反手
+        （2026-11-07 驗證：多空版年化 +4.3%、回撤 74.5%，差於只做多；使用者決定採用）
 標的：top_volume: N → 每次判斷前取「過去 30 天成交額前 N 名」（上市滿 90 天），每幣 capital_usdt / N；
     持有中但掉出名單的幣不強制賣，跌破均線才賣（驗證見 reports/daily-trend-top10-*.md）
 
@@ -38,6 +40,7 @@ DEFAULTS = {
     "run_at_utc": "00:05",      # 日 K 於 UTC 00:00 收盤
     "top_volume": 0,            # > 0 → 每次判斷前改用「過去 30 天成交額前 N 名」取代 symbols
     "min_listed_days": 90,      # 名單只收上市滿 90 天的幣（與回測一致）
+    "mode": "long",             # long：只做多；ls：多空都做（跌破均線做空，站回均線回補）
 }
 LOG_CSV = Path("logs/daily_trend.csv")
 
@@ -55,6 +58,26 @@ def should_hold(closes: list[float], sma_days: int) -> bool | None:
         return None
     sma = sum(closes[-sma_days:]) / sma_days
     return closes[-1] > sma
+
+
+HOLD_ACTION = {"LONG": "hold", "SHORT": "hold_short", "FLAT": "flat"}
+STRATEGY_NAME = {"long": "sma50_long", "ls": "sma50_ls"}
+
+
+def allowed_sides(mode: str) -> set[str]:
+    return {"LONG", "SHORT"} if mode == "ls" else {"LONG"}
+
+
+def desired_side(closes: list[float], sma_days: int, mode: str = "long") -> str | None:
+    """最新收盤 > 均線 → LONG；多空模式下 < 均線 → SHORT；其餘 FLAT；資料不足 → None（不動作）"""
+    if len(closes) < sma_days:
+        return None
+    sma = sum(closes[-sma_days:]) / sma_days
+    if closes[-1] > sma:
+        return "LONG"
+    if mode == "ls" and closes[-1] < sma:
+        return "SHORT"
+    return "FLAT"
 
 
 def floor_qty(qty: float, step: float) -> float:
@@ -92,9 +115,11 @@ def avg_quote_volume(klines: list[list], now_ms: int, days: int = 30) -> float:
     return sum(vols) / len(vols) if vols else 0.0
 
 
-def own_long_symbols(positions: dict[str, dict], lev: int) -> list[str]:
-    """本策略的倉＝槓桿與設定相同的多單（舊機器人的 10 倍單、空單都不算）"""
-    return [s for s, p in positions.items() if p["side"] == "LONG" and int(p.get("leverage", lev)) == lev]
+def own_symbols(positions: dict[str, dict], lev: int, mode: str = "long") -> list[str]:
+    """本策略的倉＝槓桿與設定相同、方向在本模式內（只做多：多單；多空：多單與空單）"""
+    sides = allowed_sides(mode)
+    return [s for s, p in positions.items() if p["side"] in sides and int(p.get("leverage", lev)) == lev]
+
 
 
 async def resolve_symbols(api, cfg: dict, positions: dict[str, dict],
@@ -103,7 +128,7 @@ async def resolve_symbols(api, cfg: dict, positions: dict[str, dict],
     top_volume > 0：先以 24h 成交額取 3N 個候選，再用過去 30 天平均成交額排出前 N 名（與回測一致）；
     持有中但掉出名單者照樣判斷 —— 只會在跌破均線時賣出，不會加碼。"""
     n = int(cfg.get("top_volume") or 0)
-    held = own_long_symbols(positions, int(cfg["leverage"]))
+    held = own_symbols(positions, int(cfg["leverage"]), cfg.get("mode", "long"))
     base = list(cfg["symbols"])
     cache: dict[str, list] = {}
     if n > 0:
@@ -143,83 +168,107 @@ async def available_usdt(api) -> float:
 
 async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = None,
                     allow_buy: bool = True, tracker=None) -> list[dict]:
-    """對每個標的判斷並（必要時）下單；回傳每個標的的決策紀錄。
-    allow_buy=False（儀表板按了暫停）→ 不買進新倉，但該賣照賣。
-    tracker：有給就把買進／賣出寫進資料庫（儀表板的交易紀錄與績效）。"""
+    """對每個標的判斷並（必要時）下單；回傳決策紀錄（反手時同一標的兩筆：先平倉、再開新倉）。
+    allow_buy=False（儀表板按了暫停）→ 不開新倉，但該平的照平。
+    tracker：有給就把開倉／平倉寫進資料庫（儀表板的交易紀錄與績效）。"""
     now_ms = now_ms or int(time.time() * 1000)
     lev = int(cfg["leverage"])
+    mode = cfg.get("mode", "long")
+    sides = allowed_sides(mode)
     positions = {p["symbol"]: p for p in await api.get_open_positions()}
     symbols, extra, cache = await resolve_symbols(api, cfg, positions, now_ms)
     slots = int(cfg.get("top_volume") or 0) or len(cfg["symbols"])
     per_symbol = float(cfg["capital_usdt"]) / slots
     avail = None
     out = []
+
+    def emit(rec):
+        rec["dry_run"] = dry_run
+        logger.info("%s %s close=%s sma=%s %s", rec["symbol"], rec["action"], rec.get("close"),
+                    rec.get("sma"), rec.get("note", ""))
+        out.append(rec)
+
     for sym in symbols:
-        rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": sym}
+        base = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": sym}
+        rec = dict(base)
         try:
             kl = cache.get(sym) or await api.get_klines(sym, "1d", limit=cfg["sma_days"] + 5)
             closes = closed_closes(kl, now_ms)
-            hold = should_hold(closes, cfg["sma_days"])
-            sma = sum(closes[-cfg["sma_days"]:]) / cfg["sma_days"] if hold is not None else None
-            rec.update(close=closes[-1] if closes else None, sma=round(sma, 6) if sma else None)
+            want = desired_side(closes, cfg["sma_days"], mode)
+            sma = sum(closes[-cfg["sma_days"]:]) / cfg["sma_days"] if want is not None else None
+            base.update(close=closes[-1] if closes else None, sma=round(sma, 6) if sma else None)
+            rec.update(base)
             pos = positions.get(sym)
+            cur = pos["side"] if pos else "FLAT"
 
-            if hold is None:
+            if want is None:
                 rec["action"] = "skip"
                 rec["note"] = f"日 K 不足 {cfg['sma_days']} 根"
-            elif pos and (pos["side"] != "LONG" or int(pos.get("leverage", lev)) != lev):
-                # 不是本策略開的倉（例如舊機器人留下的空單／10 倍單）→ 不碰，避免誤平別人的倉
+            elif pos and (pos["side"] not in sides or int(pos.get("leverage", lev)) != lev):
+                # 不是本策略開的倉（例如舊機器人留下的 10 倍單）→ 不碰，避免誤平別人的倉
                 rec["action"] = "skip"
                 rec["note"] = f"已有非本策略的倉位（{pos['side']} {pos.get('leverage')}x），請先手動處理"
-            elif hold and not pos and not allow_buy:
-                rec["action"] = "skip"
-                rec["note"] = "已暫停（儀表板），不買進新倉"
-            elif hold and not pos:
-                price = await api.get_ticker_price(sym)
-                step, min_notional = symbol_filters(await api.get_symbol_info(sym))
-                qty = fit_qty(per_symbol * lev, price, step)
-                if avail is None:
-                    avail = await available_usdt(api)
-                if qty * price < min_notional:
-                    rec["action"] = "skip"
-                    rec["note"] = f"金額 {per_symbol:.2f}U 低於最小下單 {min_notional}U"
-                elif qty * price / lev > avail:
-                    rec["action"] = "skip"
-                    rec["note"] = f"可用餘額 {avail:.2f}U 不足 {qty * price / lev:.2f}U"
-                else:
-                    rec.update(action="buy", qty=qty, price=price)
-                    avail -= qty * price / lev
-                    if not dry_run:
-                        await api.set_margin_type(sym, cfg["margin_type"])
-                        await api.set_leverage(sym, lev)
-                        await api.futures_market_order(sym, "BUY", qty)
-                        if tracker is not None:
-                            tracker.record_open({"bot_id": "futures", "mode": "futures", "symbol": sym,
-                                                 "side": "LONG", "entry_price": price, "quantity": qty,
-                                                 "strategy": "sma50_long"})
-            elif not hold and pos:
-                rec.update(action="sell", qty=pos["quantity"])
-                if not dry_run:
-                    await api.futures_market_order(sym, "SELL", pos["quantity"], reduce_only=True)
-                    if tracker is not None:
-                        price = await api.get_ticker_price(sym)
-                        entry = float(pos["entry_price"])
-                        tracker.record_close(
-                            trade_id=None, symbol=sym, exit_price=price,
-                            pnl=round((price - entry) * pos["quantity"], 4),
-                            pnl_pct=round((price / entry - 1) * 100, 2) if entry else 0.0,
-                            bot_id="futures", reason=f"收盤跌破 {cfg['sma_days']} 日均線")
+            elif cur == want:
+                rec["action"] = HOLD_ACTION[want]
+                if sym in extra and want != "FLAT":
+                    rec["note"] = f"已掉出成交量前 {cfg['top_volume']} 名：持有到收盤穿越均線才平倉"
             else:
-                rec["action"] = "hold" if hold else "flat"
-            if sym in extra and rec["action"] == "hold":
-                rec["note"] = f"已掉出成交量前 {cfg['top_volume']} 名：持有到跌破均線才賣"
+                if cur != "FLAT":
+                    # ── 平倉：多單收盤跌破均線／空單收盤站回均線 ──
+                    close_rec = {**base, "action": "sell" if cur == "LONG" else "cover", "qty": pos["quantity"]}
+                    if not dry_run:
+                        await api.futures_market_order(sym, "SELL" if cur == "LONG" else "BUY",
+                                                       pos["quantity"], reduce_only=True)
+                        if tracker is not None:
+                            price = await api.get_ticker_price(sym)
+                            entry = float(pos["entry_price"])
+                            sign = 1 if cur == "LONG" else -1
+                            tracker.record_close(
+                                trade_id=None, symbol=sym, exit_price=price,
+                                pnl=round(sign * (price - entry) * pos["quantity"], 4),
+                                pnl_pct=round(sign * (price / entry - 1) * 100, 2) if entry else 0.0,
+                                bot_id="futures",
+                                reason=f"收盤{'跌破' if cur == 'LONG' else '站回'} {cfg['sma_days']} 日均線")
+                    avail = None                          # 平倉釋出保證金 → 開新倉前重查餘額
+                    emit(close_rec)
+                    rec = None
+                if want != "FLAT":
+                    # ── 開倉：站上均線做多／（多空模式）跌破均線做空 ──
+                    rec = {**base}
+                    if sym in extra:
+                        rec["action"] = "skip"
+                        rec["note"] = f"已掉出成交量前 {cfg['top_volume']} 名：平倉後不再開新倉"
+                    elif not allow_buy:
+                        rec["action"] = "skip"
+                        rec["note"] = "已暫停（儀表板），不開新倉"
+                    else:
+                        price = await api.get_ticker_price(sym)
+                        step, min_notional = symbol_filters(await api.get_symbol_info(sym))
+                        qty = fit_qty(per_symbol * lev, price, step)
+                        if avail is None:
+                            avail = await available_usdt(api)
+                        if qty * price < min_notional:
+                            rec["action"] = "skip"
+                            rec["note"] = f"金額 {per_symbol:.2f}U 低於最小下單 {min_notional}U"
+                        elif qty * price / lev > avail:
+                            rec["action"] = "skip"
+                            rec["note"] = f"可用餘額 {avail:.2f}U 不足 {qty * price / lev:.2f}U"
+                        else:
+                            rec.update(action="buy" if want == "LONG" else "short", qty=qty, price=price)
+                            avail -= qty * price / lev
+                            if not dry_run:
+                                await api.set_margin_type(sym, cfg["margin_type"])
+                                await api.set_leverage(sym, lev)
+                                await api.futures_market_order(sym, "BUY" if want == "LONG" else "SELL", qty)
+                                if tracker is not None:
+                                    tracker.record_open({"bot_id": "futures", "mode": "futures", "symbol": sym,
+                                                         "side": want, "entry_price": price, "quantity": qty,
+                                                         "strategy": STRATEGY_NAME[mode]})
         except Exception as e:  # noqa: BLE001 — 單一標的失敗不影響其他標的
-            rec.update(action="error", note=str(e))
+            rec = {**base, "action": "error", "note": str(e)}
             logger.error("%s 判斷／下單失敗: %s", sym, e)
-        rec["dry_run"] = dry_run
-        logger.info("%s %s close=%s sma=%s %s", sym, rec["action"], rec.get("close"),
-                    rec.get("sma"), rec.get("note", ""))
-        out.append(rec)
+        if rec is not None:
+            emit(rec)
     return out
 
 
@@ -254,8 +303,9 @@ async def amain(args):
         raise SystemExit("真金模式需設定 LIVE_TRADING_ACK=I_UNDERSTAND（或先用 --dry-run）")
     mode = "測試網" if b["testnet"] else "真金"
     universe = f"成交量前 {cfg['top_volume']} 名（每次判斷前更新）" if int(cfg["top_volume"] or 0) > 0 else cfg["symbols"]
-    logger.info("日線均線機器人（%s%s）：%s，均線 %d 天，投入 %.0fU，%dx",
-                mode, "・只看不下單" if args.dry_run else "", universe,
+    side_txt = "多空都做" if cfg.get("mode") == "ls" else "只做多"
+    logger.info("日線均線機器人（%s%s）：%s，%s，均線 %d 天，投入 %.0fU，%dx",
+                mode, "・只看不下單" if args.dry_run else "", universe, side_txt,
                 cfg["sma_days"], float(cfg["capital_usdt"]), int(cfg["leverage"]))
 
     api = BinanceAPI(api_key=b["api_key"], api_secret=b["api_secret"], testnet=b["testnet"])

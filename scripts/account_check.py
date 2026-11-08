@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from src.daily_trend_bot import DEFAULTS, closed_closes, resolve_symbols, should_hold
+from src.daily_trend_bot import DEFAULTS, allowed_sides, closed_closes, desired_side, resolve_symbols
 
 TW = timezone(timedelta(hours=8))
 INCOME_TYPES = ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE")
@@ -36,19 +36,25 @@ def summarize_income(rows: list[dict], strategy_symbols: list[str]) -> dict:
     return out
 
 
-def verdict(hold: bool | None, pos: dict | None, lev: int) -> str:
-    """策略應有狀態 vs 帳戶實際持倉"""
-    if hold is None:
+SIDE_TXT = {"LONG": "多單", "SHORT": "空單", "FLAT": "空手"}
+
+
+def verdict(want, pos: dict | None, lev: int, mode: str = "long") -> str:
+    """策略應有狀態（LONG／SHORT／FLAT；舊呼叫可傳 True＝LONG、False＝FLAT）vs 帳戶實際持倉"""
+    if want is None:
         return "資料不足，無法判斷"
-    if pos and (pos["side"] != "LONG" or int(pos.get("leverage", lev)) != lev):
+    if isinstance(want, bool):
+        want = "LONG" if want else "FLAT"
+    if pos and (pos["side"] not in allowed_sides(mode) or int(pos.get("leverage", lev)) != lev):
         return f"⚠ 帳上是 {pos['side']} {pos.get('leverage')}x，不是本策略的倉（舊機器人留下的？）"
-    if hold and pos:
-        return "✓ 一致：該持有、帳上有多單"
-    if not hold and not pos:
-        return "✓ 一致：該空手、帳上沒倉"
-    if hold and not pos:
-        return "⚠ 不一致：該持有但帳上沒倉（暫停中？或下次檢查才會買）"
-    return "⚠ 不一致：該空手但帳上還有多單（下次檢查會賣）"
+    have = pos["side"] if pos else "FLAT"
+    if have == want:
+        return f"✓ 一致：應{SIDE_TXT[want]}、帳上{'有' + SIDE_TXT[have] if pos else '沒倉'}"
+    if want == "FLAT":
+        return f"⚠ 不一致：該空手但帳上還有{SIDE_TXT[have]}（下次檢查會平倉）"
+    if not pos:
+        return f"⚠ 不一致：應{SIDE_TXT[want]}但帳上沒倉（暫停中？或下次檢查才會開倉）"
+    return f"⚠ 不一致：應{SIDE_TXT[want]}但帳上是{SIDE_TXT[have]}（下次檢查會反手）"
 
 
 def _fmt_income(group: dict) -> list[str]:
@@ -80,7 +86,7 @@ async def amain(days: int):
     config = load_config()
     cfg = {**DEFAULTS, **(config.get("daily_trend") or {})}
     b = config["binance"]
-    lev, sma_days = int(cfg["leverage"]), int(cfg["sma_days"])
+    lev, sma_days, mode = int(cfg["leverage"]), int(cfg["sma_days"]), cfg.get("mode", "long")
     api = BinanceAPI(api_key=b["api_key"], api_secret=b["api_secret"], testnet=b["testnet"])
     await api.connect()
     try:
@@ -96,7 +102,7 @@ async def amain(days: int):
         if not positions:
             print("  （沒有持倉）")
         for p in positions.values():
-            mine = p["symbol"] in syms and p["side"] == "LONG" and int(p["leverage"]) == lev
+            mine = p["symbol"] in syms and p["side"] in allowed_sides(mode) and int(p["leverage"]) == lev
             tag = "本策略" if mine else "★ 不是本策略（舊機器人留下的？）"
             print(f"  {p['symbol']:<14} {p['side']:<5} {p['leverage']}x  數量 {p['quantity']}  "
                   f"均價 {p['entry_price']}  未實現 {p['unrealized_pnl']:+.2f} U  {tag}")
@@ -110,14 +116,14 @@ async def amain(days: int):
         for sym in syms:
             kl = cache.get(sym) or await api.get_klines(sym, "1d", limit=sma_days + 5)
             closes = closed_closes(kl, now_ms)
-            hold = should_hold(closes, sma_days)
-            if hold is None:
-                print(f"  {sym:<10} {verdict(None, None, lev)}")
+            want = desired_side(closes, sma_days, mode)
+            if want is None:
+                print(f"  {sym:<10} {verdict(None, None, lev, mode)}")
                 continue
             sma = sum(closes[-sma_days:]) / sma_days
-            tag = "（已掉出名單，跌破才賣）" if sym in extra else ""
+            tag = "（已掉出名單，穿越均線才平倉）" if sym in extra else ""
             print(f"  {sym:<10}{tag} 收盤 {closes[-1]:,.6g}  均線 {sma:,.6g}（{(closes[-1] / sma - 1) * 100:+.2f}%）"
-                  f" → 應{'持有' if hold else '空手'}｜{verdict(hold, positions.get(sym), lev)}")
+                  f" → 應{SIDE_TXT[want]}｜{verdict(want, positions.get(sym), lev, mode)}")
     finally:
         await api.disconnect()
 
