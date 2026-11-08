@@ -28,10 +28,21 @@ class TestVerdict(unittest.TestCase):
         long1 = {"side": "LONG", "leverage": 1}
         self.assertIn("✓", ac.verdict(True, long1, 1))
         self.assertIn("✓", ac.verdict(False, None, 1))
-        self.assertIn("該持有但帳上沒倉", ac.verdict(True, None, 1))
+        self.assertIn("應多單但帳上沒倉", ac.verdict(True, None, 1))
         self.assertIn("該空手但帳上還有多單", ac.verdict(False, long1, 1))
         self.assertIn("不是本策略", ac.verdict(False, {"side": "SHORT", "leverage": 10}, 1))
         self.assertIn("不是本策略", ac.verdict(True, {"side": "LONG", "leverage": 10}, 1))
+
+
+class TestVerdictLongShort(unittest.TestCase):
+    def test_ls_mode(self):
+        short1 = {"side": "SHORT", "leverage": 1}
+        long1 = {"side": "LONG", "leverage": 1}
+        self.assertIn("✓", ac.verdict("SHORT", short1, 1, "ls"))
+        self.assertIn("會反手", ac.verdict("SHORT", long1, 1, "ls"))
+        self.assertIn("應空單但帳上沒倉", ac.verdict("SHORT", None, 1, "ls"))
+        self.assertIn("不是本策略", ac.verdict("SHORT", short1, 1, "long"))       # 只做多模式：空單不是本策略
+        self.assertIn("不是本策略", ac.verdict("SHORT", {"side": "SHORT", "leverage": 10}, 1, "ls"))
 
 
 class TestReport(unittest.TestCase):
@@ -60,7 +71,7 @@ class TestReport(unittest.TestCase):
         self.assertIn("363.00", out)
         self.assertIn("★ 不是本策略", out)
         self.assertIn("-12.00", out)
-        self.assertIn("應持有｜⚠ 不一致：該持有但帳上沒倉", out)
+        self.assertIn("應多單｜⚠ 不一致：應多單但帳上沒倉", out)
         api.futures_market_order.assert_not_called()                      # 唯讀
 
 

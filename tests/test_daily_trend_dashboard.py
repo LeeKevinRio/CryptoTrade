@@ -130,3 +130,28 @@ class TestCycleIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLongShortDashboard(unittest.TestCase):
+    tearDown = TestOldDashboard.tearDown          # 還原全域 state，避免影響 /api/diag 等其他測試
+
+    def test_signal_short(self):
+        rec = {"symbol": "BTCUSDT", "close": 90.0, "sma": 100.0}
+        s = dash.signal_payload(rec, 50, "ls")
+        self.assertEqual(s["type"], "SHORT")
+        self.assertIn("做空", s["reasons"][0])
+        self.assertEqual(dash.signal_payload(rec, 50, "long")["type"], "NEUTRAL")
+
+    def test_manual_close_short_buys_back(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from src.risk.position_manager import Position
+        api = MagicMock()
+        api.futures_market_order = AsyncMock()
+        api.get_ticker_price = AsyncMock(return_value=90.0)
+        ref = dash.attach(api, {"symbols": ["BTCUSDT"], "leverage": 1}, MagicMock(), testnet=True)
+        ref.position_manager.all_positions = {
+            "BTCUSDT": Position(symbol="BTCUSDT", side="SHORT", entry_price=100.0, quantity=1.0, leverage=1)}
+        out = asyncio.run(ref.executor.close_position("BTCUSDT", 1.0))
+        api.futures_market_order.assert_awaited_with("BTCUSDT", "BUY", 1.0, reduce_only=True)
+        self.assertAlmostEqual(out["pnl"], 10.0)

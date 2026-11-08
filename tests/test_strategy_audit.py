@@ -29,19 +29,44 @@ KL = _kl([10, 10, 10, 10, 10, 12, 5, 5], T0 - 6 * DAY + 10 * 3_600_000)
 
 class TestDecisions(unittest.TestCase):
     def test_expected_uses_only_closed(self):
-        hold, close, _ = sa.expected_at(KL, T0, 5)
-        self.assertTrue(hold)
+        want, close, _ = sa.expected_at(KL, T0, 5)
+        self.assertEqual(want, "LONG")
         self.assertEqual(close, 12.0)
-        self.assertFalse(sa.expected_at(KL, T0 + DAY, 5)[0])
+        self.assertEqual(sa.expected_at(KL, T0 + DAY, 5)[0], "FLAT")
+        self.assertEqual(sa.expected_at(KL, T0 + DAY, 5, "ls")[0], "SHORT")
 
     def test_check_decision(self):
         ok = {"ts": _iso(T0), "symbol": "A", "action": "buy", "close": "12.0"}
         self.assertIsNone(sa.check_decision(ok, KL, 5))
         bad = {**ok, "action": "flat"}
-        self.assertIn("應持有", sa.check_decision(bad, KL, 5))
+        self.assertIn("應做多", sa.check_decision(bad, KL, 5))
         wrong_close = {**ok, "close": "11.0"}
         self.assertIn("不同", sa.check_decision(wrong_close, KL, 5))
         self.assertIsNone(sa.check_decision({**ok, "action": "skip"}, KL, 5))
+
+
+class TestDecisionsLongShort(unittest.TestCase):
+    def test_ls_actions(self):
+        t1 = _iso(T0 + DAY)                                         # 收盤 5 < 均線 → 應做空
+        self.assertIsNone(sa.check_decision({"ts": t1, "symbol": "A", "action": "short"}, KL, 5, "ls"))
+        self.assertIsNone(sa.check_decision({"ts": t1, "symbol": "A", "action": "sell"}, KL, 5, "ls"))
+        self.assertIn("應做空", sa.check_decision({"ts": t1, "symbol": "A", "action": "flat"}, KL, 5, "ls"))
+        self.assertIn("應做多", sa.check_decision({"ts": _iso(T0), "symbol": "A", "action": "short"}, KL, 5, "ls"))
+        self.assertIsNone(sa.check_decision({"ts": _iso(T0), "symbol": "A", "action": "cover"}, KL, 5, "ls"))
+
+    def test_short_round_trip_and_match(self):
+        orders = [{"symbol": "A", "side": "SELL", "time": T0 + 500, "qty": 2, "quote": 20, "price": 10.0,
+                   "realized": 0.0, "commission": 0.01},
+                  {"symbol": "A", "side": "BUY", "time": T0 + DAY + 500, "qty": 2, "quote": 16, "price": 8.0,
+                   "realized": 4.0, "commission": 0.01}]
+        log = [{"ts": _iso(T0), "symbol": "A", "action": "short", "qty": "2"},
+               {"ts": _iso(T0 + DAY), "symbol": "A", "action": "cover", "qty": "2"}]
+        pairs, missing, foreign = sa.match_orders(orders, log)
+        self.assertEqual((len(pairs), missing, foreign), (2, [], []))
+        trips = sa.round_trips([{**o, "action": r["action"]} for r, o in pairs])
+        self.assertEqual(trips[0]["side"], "空")
+        self.assertAlmostEqual(trips[0]["pct"], 20.0)                # 10 → 8 做空 +20%
+        self.assertAlmostEqual(trips[0]["pnl"], 4.0 - 0.02)
 
 
 class TestOrders(unittest.TestCase):

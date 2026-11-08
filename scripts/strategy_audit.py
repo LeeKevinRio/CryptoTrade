@@ -19,11 +19,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.daily_trend_bot import DEFAULTS, LOG_CSV, closed_closes, should_hold
+from src.daily_trend_bot import DEFAULTS, LOG_CSV, closed_closes, desired_side
 
 TW = timezone(timedelta(hours=8))
 DAY_MS = 86_400_000
 MATCH_MS = 15 * 60 * 1000
+BACKTEST_NOTE_LS = "回測（前 10 名多空都做，2021-01 ~ 2026-10）：月勝率 44%、平均每週開倉 4.4 次、年化 +4.3%、最大回撤 74.5%"
 BACKTEST_NOTE = "回測（前 10 名，2020-12 ~ 2026-09）：月勝率 37%、平均每週買進 2.3 次 —— 常常小虧、靠少數大漲賺"
 
 
@@ -62,39 +63,48 @@ def group_fills(fills: list[dict]) -> list[dict]:
     return sorted(out, key=lambda o: o["time"])
 
 
-def expected_at(klines: list[list], t_ms: int, sma_days: int) -> tuple[bool | None, float | None, float | None]:
-    """在 t_ms 這個時間點，規則應該持有嗎？（只用當時已收盤的日 K）"""
+def expected_at(klines: list[list], t_ms: int, sma_days: int,
+                mode: str = "long") -> tuple[str | None, float | None, float | None]:
+    """在 t_ms 這個時間點規則應有的狀態（LONG／SHORT／FLAT；只用當時已收盤的日 K）"""
     closes = closed_closes(klines, t_ms)
-    hold = should_hold(closes, sma_days)
-    if hold is None:
+    want = desired_side(closes, sma_days, mode)
+    if want is None:
         return None, None, None
-    return hold, closes[-1], sum(closes[-sma_days:]) / sma_days
+    return want, closes[-1], sum(closes[-sma_days:]) / sma_days
 
 
-def check_decision(row: dict, klines: list[list], sma_days: int) -> str | None:
+# 紀錄動作 → 動作完成後規則要求的狀態（sell／cover 之後若同時反手，會另有一筆 short／buy）
+_ACTION_OK = {"buy": {"LONG"}, "hold": {"LONG"}, "short": {"SHORT"}, "hold_short": {"SHORT"},
+              "sell": {"FLAT", "SHORT"}, "cover": {"FLAT", "LONG"}, "flat": {"FLAT"}}
+_STATE_TXT = {"LONG": "做多", "SHORT": "做空", "FLAT": "空手"}
+
+
+def check_decision(row: dict, klines: list[list], sma_days: int, mode: str = "long") -> str | None:
     """回傳錯誤說明；正確（或無法判斷）回傳 None"""
     act = row["action"]
-    if act not in ("buy", "sell", "hold", "flat"):
+    if act not in _ACTION_OK:
         return None
-    hold, close, sma = expected_at(klines, _ms(row["ts"]), sma_days)
-    if hold is None:
+    want, close, sma = expected_at(klines, _ms(row["ts"]), sma_days, mode)
+    if want is None:
         return None
-    should = act in ("buy", "hold")
-    if should != hold:
-        return (f"紀錄 {act}，但收盤 {close:g} {'>' if hold else '≤'} 均線 {sma:.6g} → 應"
-                f"{'持有' if hold else '空手'}")
+    if want not in _ACTION_OK[act]:
+        rel = ">" if close > sma else ("<" if close < sma else "=")
+        return f"紀錄 {act}，但收盤 {close:g} {rel} 均線 {sma:.6g} → 應{_STATE_TXT[want]}"
     if row.get("close") and abs(float(row["close"]) / close - 1) > 1e-6:
         return f"紀錄的收盤 {row['close']} 與幣安日 K {close:g} 不同"
     return None
 
 
+ORDER_SIDE = {"buy": "BUY", "sell": "SELL", "short": "SELL", "cover": "BUY"}
+
+
 def match_orders(orders: list[dict], log_rows: list[dict]) -> tuple[list, list[dict], list[dict]]:
     """(配對成功 [(紀錄, 單)], 沒成交的紀錄, 不是本機器人的單)"""
-    want = [r for r in log_rows if r["action"] in ("buy", "sell")]
+    want = [r for r in log_rows if r["action"] in ORDER_SIDE]
     used: set[int] = set()
     pairs, missing = [], []
     for r in want:
-        side, t = ("BUY" if r["action"] == "buy" else "SELL"), _ms(r["ts"])
+        side, t = ORDER_SIDE[r["action"]], _ms(r["ts"])
         best = None
         for i, o in enumerate(orders):
             if i in used or o["symbol"] != r["symbol"] or o["side"] != side:
@@ -111,21 +121,24 @@ def match_orders(orders: list[dict], log_rows: list[dict]) -> tuple[list, list[d
 
 
 def round_trips(orders: list[dict]) -> list[dict]:
-    """本策略的單（一次買滿、一次賣光）→ 每筆進出"""
+    """本策略的單 → 每筆進出。單上有 action（buy／short 開倉、sell／cover 平倉）就照它；
+    沒有就視為只做多（BUY 開、SELL 平）"""
     open_: dict[str, dict] = {}
     trips = []
     for o in sorted(orders, key=lambda o: o["time"]):
-        if o["side"] == "BUY":
-            open_[o["symbol"]] = o
+        act = o.get("action") or ("buy" if o["side"] == "BUY" else "sell")
+        if act in ("buy", "short"):
+            open_[o["symbol"]] = {**o, "action": act}
         elif o["symbol"] in open_:
             b = open_.pop(o["symbol"])
+            sign = -1 if b["action"] == "short" else 1
             pnl = o["realized"] - b["commission"] - o["commission"]
-            trips.append({"symbol": o["symbol"], "entry": b, "exit": o, "pnl": pnl,
-                          "pct": (o["price"] / b["price"] - 1) * 100 if b["price"] else 0.0,
+            trips.append({"symbol": o["symbol"], "side": "空" if sign < 0 else "多", "entry": b, "exit": o,
+                          "pnl": pnl, "pct": sign * (o["price"] / b["price"] - 1) * 100 if b["price"] else 0.0,
                           "days": (o["time"] - b["time"]) / DAY_MS})
     for b in open_.values():
-        trips.append({"symbol": b["symbol"], "entry": b, "exit": None, "pnl": None, "pct": None,
-                      "days": None})
+        trips.append({"symbol": b["symbol"], "side": "空" if b["action"] == "short" else "多", "entry": b,
+                      "exit": None, "pnl": None, "pct": None, "days": None})
     return trips
 
 
@@ -178,7 +191,8 @@ async def amain(days: int, log_path: Path):
     if not log_rows:
         L += [f"⚠ 找不到機器人的判斷紀錄 {log_path}（請在專案資料夾執行；只看模式的紀錄不算）", ""]
 
-    errs = [(r, e) for r in log_rows if (e := check_decision(r, klines.get(r["symbol"], []), sma_days))]
+    mode = cfg.get("mode", "long")
+    errs = [(r, e) for r in log_rows if (e := check_decision(r, klines.get(r["symbol"], []), sma_days, mode))]
     L.append(f"① 判斷是否照規則（用幣安日 K 重算）：{len(log_rows)} 筆判斷，"
              + ("✓ 全部正確" if not errs else f"✗ {len(errs)} 筆有問題"))
     L += [f"   ✗ {_tw(_ms(r['ts']))} {r['symbol']} {e}" for r, e in errs]
@@ -201,24 +215,27 @@ async def amain(days: int, log_path: Path):
         by_sym[o["symbol"]][1] += o["realized"] - o["commission"]
     L += [f"   {s:<14} {n} 張，損益 {v:+.2f}U" for s, (n, v) in sorted(by_sym.items())] or ["   （沒有）"]
 
-    trips = round_trips([o for _, o in pairs])
+    trips = round_trips([{**o, "action": r["action"]} for r, o in pairs])
     closed = [t for t in trips if t["exit"]]
     L += ["", "④ 本策略每筆交易"]
     for t in trips:
         e = t["entry"]
+        o_txt, c_txt = ("空", "補") if t["side"] == "空" else ("買", "賣")
         if t["exit"]:
-            L.append(f"   {t['symbol']:<12} {_tw(e['time'])} 買 {e['price']:.6g} → {_tw(t['exit']['time'])} 賣 "
-                     f"{t['exit']['price']:.6g}  {t['pct']:+.2f}%  {t['pnl']:+.2f}U  持有 {t['days']:.1f} 天")
+            L.append(f"   {t['symbol']:<12} {t['side']} {_tw(e['time'])} {o_txt} {e['price']:.6g} → "
+                     f"{_tw(t['exit']['time'])} {c_txt} {t['exit']['price']:.6g}  {t['pct']:+.2f}%  "
+                     f"{t['pnl']:+.2f}U  持有 {t['days']:.1f} 天")
         else:
-            L.append(f"   {t['symbol']:<12} {_tw(e['time'])} 買 {e['price']:.6g} → 持有中")
+            L.append(f"   {t['symbol']:<12} {t['side']} {_tw(e['time'])} {o_txt} {e['price']:.6g} → 持有中")
     if not trips:
         L.append("   （區間內沒有本策略的交易）")
     if closed:
         wins = sum(t["pnl"] > 0 for t in closed)
         L.append(f"   已平倉 {len(closed)} 筆：勝 {wins} 敗 {len(closed) - wins}，合計 {sum(t['pnl'] for t in closed):+.2f}U"
                  "（含手續費，不含資金費）")
-    buys = sum(o["side"] == "BUY" for _, o in pairs)
-    L.append(f"   實際每週買進 {buys / max(days, 1) * 7:.1f} 次 ｜ {BACKTEST_NOTE}")
+    opens = sum(r["action"] in ("buy", "short") for r, _ in pairs)
+    L.append(f"   實際每週開倉 {opens / max(days, 1) * 7:.1f} 次 ｜ "
+             + (BACKTEST_NOTE_LS if mode == "ls" else BACKTEST_NOTE))
 
     miss = missed_days(log_rows, since, now_ms)
     L += ["", "⑤ 漏跑的日子（電腦沒開／程式沒跑，當天沒有判斷）：" + ("、".join(miss) if miss else "沒有")]

@@ -287,3 +287,97 @@ class TestTopNLongShort(unittest.TestCase):
         squeeze = pd.Series(np.r_[np.linspace(30, 10, 150), np.full(50, 40.0)], index=idx)
         sq = d.topn_sma(pd.DataFrame({"AUSDT": squeeze}), closes * 0, uni, top_n=1, mode="ls")
         self.assertGreaterEqual(sq.short_up50, 1)
+
+
+class TestLongShortMode(unittest.TestCase):
+    """mode: ls —— 站上均線做多、跌破均線做空；穿越當天先平倉再反手"""
+
+    LS = {**CFG, "mode": "ls", "symbols": ["BTCUSDT"], "capital_usdt": 100.0}
+    UP, DOWN = (10, 10, 10, 10, 12, 1), (10, 10, 10, 10, 8, 1)
+
+    def _orders(self, api):
+        return [(c.args[1], c.args[2], c.kwargs.get("reduce_only", False))
+                for c in api.futures_market_order.await_args_list]
+
+    def test_short_when_below(self):
+        api = _api(closes=self.DOWN)
+        rows = asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["short"])
+        self.assertEqual(self._orders(api), [("SELL", 1.0, False)])
+        api.set_leverage.assert_awaited_with("BTCUSDT", 1)
+
+    def test_long_mode_never_shorts(self):
+        api = _api(closes=self.DOWN)
+        rows = asyncio.run(bot.run_cycle(api, {**self.LS, "mode": "long"}, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["flat"])
+        api.futures_market_order.assert_not_awaited()
+
+    def test_flip_long_to_short(self):
+        pos = [{"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.7, "entry_price": 90, "leverage": 1}]
+        api = _api(closes=self.DOWN, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["sell", "short"])
+        self.assertEqual(self._orders(api), [("SELL", 0.7, True), ("SELL", 1.0, False)])   # 先平多、再開空
+
+    def test_flip_short_to_long(self):
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 0.7, "entry_price": 90, "leverage": 1}]
+        api = _api(closes=self.UP, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["cover", "buy"])
+        self.assertEqual(self._orders(api), [("BUY", 0.7, True), ("BUY", 1.0, False)])
+
+    def test_hold_short(self):
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 0.7, "entry_price": 90, "leverage": 1}]
+        api = _api(closes=self.DOWN, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["hold_short"])
+        api.futures_market_order.assert_not_awaited()
+
+    def test_paused_covers_but_no_new_long(self):
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 0.7, "entry_price": 90, "leverage": 1}]
+        api = _api(closes=self.UP, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW, allow_buy=False))
+        self.assertEqual([r["action"] for r in rows], ["cover", "skip"])
+        self.assertIn("暫停", rows[1]["note"])
+        self.assertEqual(self._orders(api), [("BUY", 0.7, True)])
+
+    def test_foreign_10x_short_untouched(self):
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 3, "entry_price": 90, "leverage": 10}]
+        api = _api(closes=self.UP, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW))
+        self.assertEqual(rows[0]["action"], "skip")
+        api.futures_market_order.assert_not_awaited()
+
+    def test_dry_run_flip_places_nothing(self):
+        pos = [{"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.7, "entry_price": 90, "leverage": 1}]
+        api = _api(closes=self.DOWN, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW, dry_run=True))
+        self.assertEqual([r["action"] for r in rows], ["sell", "short"])
+        api.futures_market_order.assert_not_awaited()
+
+    def test_extra_short_outside_top_covers_without_flip(self):
+        series = {"AUSDT": (self.UP, 5), "BUSDT": (self.UP, 9), "CUSDT": (self.UP, 1)}
+        pos = [{"symbol": "CUSDT", "side": "SHORT", "quantity": 3, "entry_price": 9, "leverage": 1}]
+        api = TestTopVolume()._api(series, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, {**CFG, "mode": "ls", "top_volume": 2}, now_ms=NOW))
+        c_rows = [r for r in rows if r["symbol"] == "CUSDT"]
+        self.assertEqual([r["action"] for r in c_rows], ["cover", "skip"])          # 掉出名單：只平倉不反手
+        self.assertIn(("BUY", 3, True), self._orders(api))
+
+    def test_tracker_records_short(self):
+        tracker = MagicMock()
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 1.0, "entry_price": 120, "leverage": 1}]
+        api = _api(closes=self.UP, positions=pos, price=100.0)
+        asyncio.run(bot.run_cycle(api, self.LS, now_ms=NOW, tracker=tracker))
+        close_kw = tracker.record_close.call_args.kwargs
+        self.assertAlmostEqual(close_kw["pnl"], 20.0)                                 # 空 120 → 補 100 賺 20
+        self.assertIn("站回", close_kw["reason"])
+        opened = tracker.record_open.call_args.args[0]
+        self.assertEqual((opened["side"], opened["strategy"]), ("LONG", "sma50_ls"))
+
+    def test_desired_side(self):
+        self.assertEqual(bot.desired_side([10, 10, 10, 10, 12], 5, "ls"), "LONG")
+        self.assertEqual(bot.desired_side([10, 10, 10, 10, 8], 5, "ls"), "SHORT")
+        self.assertEqual(bot.desired_side([10] * 5, 5, "ls"), "FLAT")                  # 剛好等於均線：空手
+        self.assertEqual(bot.desired_side([10, 10, 10, 10, 8], 5, "long"), "FLAT")
+        self.assertIsNone(bot.desired_side([10] * 4, 5, "ls"))
