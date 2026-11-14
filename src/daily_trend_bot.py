@@ -41,6 +41,7 @@ DEFAULTS = {
     "top_volume": 0,            # > 0 → 每次判斷前改用「過去 30 天成交額前 N 名」取代 symbols
     "min_listed_days": 90,      # 名單只收上市滿 90 天的幣（與回測一致）
     "mode": "long",             # long：只做多；ls：多空都做（跌破均線做空，站回均線回補）
+    "symbol_capital": {},       # 個別標的的單筆金額（U），覆蓋 capital_usdt / N；例：{BTCUSDT: 200}
 }
 LOG_CSV = Path("logs/daily_trend.csv")
 
@@ -244,12 +245,13 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                     else:
                         price = await api.get_ticker_price(sym)
                         step, min_notional = symbol_filters(await api.get_symbol_info(sym))
-                        qty = fit_qty(per_symbol * lev, price, step)
+                        budget = float((cfg.get("symbol_capital") or {}).get(sym, per_symbol))
+                        qty = fit_qty(budget * lev, price, step)
                         if avail is None:
                             avail = await available_usdt(api)
                         if qty * price < min_notional:
                             rec["action"] = "skip"
-                            rec["note"] = f"金額 {per_symbol:.2f}U 低於最小下單 {min_notional}U"
+                            rec["note"] = f"金額 {budget:.2f}U 低於最小下單 {min_notional}U"
                         elif qty * price / lev > avail:
                             rec["action"] = "skip"
                             rec["note"] = f"可用餘額 {avail:.2f}U 不足 {qty * price / lev:.2f}U"

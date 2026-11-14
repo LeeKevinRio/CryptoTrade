@@ -381,3 +381,35 @@ class TestLongShortMode(unittest.TestCase):
         self.assertEqual(bot.desired_side([10] * 5, 5, "ls"), "FLAT")                  # 剛好等於均線：空手
         self.assertEqual(bot.desired_side([10, 10, 10, 10, 8], 5, "long"), "FLAT")
         self.assertIsNone(bot.desired_side([10] * 4, 5, "ls"))
+
+
+class TestSymbolCapital(unittest.TestCase):
+    """2026-11-14：每幣 25U 買不起 BTC（最小 0.001 顆、最小名目 100U）→ 個別標的可指定單筆金額"""
+
+    BTC_INFO = {"filters": [{"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                            {"filterType": "MIN_NOTIONAL", "notional": "100"}]}
+    CFG25 = {**CFG, "mode": "ls", "symbols": ["BTCUSDT"], "top_volume": 0, "capital_usdt": 25.0}
+
+    def _api(self, avail):
+        api = _api(closes=(10, 10, 10, 10, 8, 1), price=77000.0)
+        api.get_symbol_info = AsyncMock(return_value=self.BTC_INFO)
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": str(avail)})
+        return api
+
+    def test_default_budget_skips_btc(self):
+        rec = asyncio.run(bot.run_cycle(self._api(1000), self.CFG25, now_ms=NOW))[0]
+        self.assertEqual(rec["action"], "skip")
+        self.assertIn("低於最小下單", rec["note"])
+
+    def test_override_opens_btc(self):
+        api = self._api(1000)
+        cfg = {**self.CFG25, "symbol_capital": {"BTCUSDT": 200}}
+        rec = asyncio.run(bot.run_cycle(api, cfg, now_ms=NOW))[0]
+        self.assertEqual((rec["action"], rec["qty"]), ("short", 0.003))      # 231U，最接近 200U
+        api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.003)
+
+    def test_override_needs_balance(self):
+        cfg = {**self.CFG25, "symbol_capital": {"BTCUSDT": 200}}
+        rec = asyncio.run(bot.run_cycle(self._api(60), cfg, now_ms=NOW))[0]
+        self.assertEqual(rec["action"], "skip")
+        self.assertIn("可用餘額", rec["note"])

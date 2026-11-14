@@ -273,6 +273,10 @@ daily_trend:
   mode: ls
   sma_days: 50
   capital_usdt: 250             # 投入本策略的總金額（等分給各標的）；2026-10-31 使用者調為 250（每幣約 25U）
+  # 個別標的的單筆金額（U），覆蓋 capital_usdt / 10。BTC 合約最小下單約 100U，25U 下不了單；
+  # 使用者決定（2026-11-14）：BTC 一次開 200U（實際取最接近的 0.001 顆，約 150~250U）
+  symbol_capital:
+    BTCUSDT: 200
   leverage: 1                   # 回測只驗證過 1 倍；2 倍兩年內腰斬機率 37%
   margin_type: ISOLATED
   # 每天判斷時間（UTC）。日 K 於 UTC 00:00（台灣 08:00）收盤；任何時間檢查都只看「已收盤」的日 K，
