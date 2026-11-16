@@ -533,3 +533,110 @@ class TestTopNStopLoss(unittest.TestCase):
         squeeze = list(np.linspace(30, 20, 150)) + [19.0, 36.0] + [19.0] * 20   # 一天暴漲，比進場價高 45% 以上
         self.assertGreaterEqual(self._run(squeeze, lev=2.0).liquidations, 1)
         self.assertEqual(self._run(squeeze).liquidations, 0)                     # 1 倍不模擬強平
+
+
+class TestTakeProfitStopLoss(unittest.TestCase):
+    """2026-11-16：空單收盤獲利達 20% 停利、多空單收盤虧損達門檻停損；出場後等收盤回到均線另一側才再進場"""
+
+    C = {**CFG, "mode": "ls", "symbols": ["BTCUSDT"], "capital_usdt": 100.0,
+         "take_profit_short_pct": 20, "stop_loss_pct": 15}
+    DOWN, UP = (10, 10, 10, 10, 8, 1), (10, 10, 10, 10, 12, 1)       # 最新已收盤 8（均線下）／12（均線上）
+
+    def _short(self, entry):
+        return [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 0.7, "entry_price": entry, "leverage": 1}]
+
+    def test_exit_rule(self):
+        self.assertEqual(bot.exit_rule("SHORT", 10, 8, self.C)[0], "tp")           # 空單 +20%
+        self.assertIsNone(bot.exit_rule("SHORT", 10, 8.1, self.C))                  # +19% 還不到
+        self.assertEqual(bot.exit_rule("SHORT", 10, 11.5, self.C)[0], "sl")         # 空單 -15%
+        self.assertEqual(bot.exit_rule("LONG", 10, 8.5, self.C)[0], "sl")           # 多單 -15%
+        self.assertIsNone(bot.exit_rule("LONG", 10, 20, self.C))                    # 多單不設停利
+        self.assertIsNone(bot.exit_rule("SHORT", 10, 1, {**self.C, "take_profit_short_pct": 0}))
+        self.assertIsNone(bot.exit_rule("SHORT", 0, 8, self.C))
+
+    def test_short_take_profit_then_waits(self):
+        locks = {}
+        api = _api(closes=self.DOWN, positions=self._short(10))                    # 空在 10，收盤 8 → +20%
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
+        self.assertEqual([r["action"] for r in rows], ["tp_cover"])
+        api.futures_market_order.assert_awaited_once_with("BTCUSDT", "BUY", 0.7, reduce_only=True)
+        self.assertEqual(locks, {"BTCUSDT": "SHORT"})
+        api2 = _api(closes=self.DOWN)                                               # 隔天仍在均線下、已空手
+        rows2 = asyncio.run(bot.run_cycle(api2, self.C, now_ms=NOW, locks=locks))
+        self.assertEqual([r["action"] for r in rows2], ["wait"])                    # 不馬上再空
+        api2.futures_market_order.assert_not_awaited()
+
+    def test_lock_released_after_reclaim_then_shorts_again(self):
+        locks = {"BTCUSDT": "SHORT"}
+        api = _api(closes=self.UP)                                                  # 收盤站回均線 → 解除，並照規則做多
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
+        self.assertEqual(rows[0]["action"], "buy")
+        self.assertEqual(locks, {})
+        api2 = _api(closes=self.DOWN)
+        self.assertEqual(asyncio.run(bot.run_cycle(api2, self.C, now_ms=NOW, locks=locks))[0]["action"], "short")
+
+    def test_short_stop_loss(self):
+        locks = {}
+        api = _api(closes=self.DOWN, positions=self._short(6.9))                    # 空在 6.9，收盤 8 → -15.9%
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
+        self.assertEqual(rows[0]["action"], "sl_cover")
+        self.assertIn("停損", rows[0]["note"])
+        self.assertEqual(locks, {"BTCUSDT": "SHORT"})
+
+    def test_long_stop_loss(self):
+        pos = [{"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.7, "entry_price": 15, "leverage": 1}]
+        locks = {}
+        api = _api(closes=self.UP, positions=pos)                                   # 多在 15，收盤 12 → -20%
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
+        self.assertEqual(rows[0]["action"], "sl_sell")
+        api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.7, reduce_only=True)
+        self.assertEqual(locks, {"BTCUSDT": "LONG"})
+
+    def test_no_exit_within_thresholds(self):
+        api = _api(closes=self.DOWN, positions=self._short(9))                      # +11%：繼續抱
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks={}))
+        self.assertEqual(rows[0]["action"], "hold_short")
+        api.futures_market_order.assert_not_awaited()
+
+    def test_paused_still_takes_profit(self):
+        api = _api(closes=self.DOWN, positions=self._short(10))
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, allow_buy=False, locks={}))
+        self.assertEqual(rows[0]["action"], "tp_cover")
+
+    def test_dry_run_changes_nothing(self):
+        locks = {}
+        api = _api(closes=self.DOWN, positions=self._short(10))
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, dry_run=True, locks=locks))
+        self.assertEqual(rows[0]["action"], "tp_cover")
+        api.futures_market_order.assert_not_awaited()
+        self.assertEqual(locks, {})
+
+    def test_foreign_position_never_exits(self):
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 3, "entry_price": 10, "leverage": 10}]
+        api = _api(closes=self.DOWN, positions=pos)
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks={}))
+        self.assertEqual(rows[0]["action"], "skip")
+        api.futures_market_order.assert_not_awaited()
+
+    def test_tracker_and_state_file(self):
+        import tempfile
+        from pathlib import Path
+        tracker = MagicMock()
+        api = _api(closes=self.DOWN, positions=self._short(10), price=8.0)
+        asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, tracker=tracker, locks={}))
+        kw = tracker.record_close.call_args.kwargs
+        self.assertAlmostEqual(kw["pnl"], 1.4)                                      # (10 - 8) × 0.7
+        self.assertEqual(kw["reason"], "停利 20%")
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "state.json"
+            self.assertEqual(bot.load_locks(f), {})                                 # 沒有檔案 → 空
+            bot.save_locks({"ZECUSDT": "SHORT"}, f)
+            self.assertEqual(bot.load_locks(f), {"ZECUSDT": "SHORT"})
+            f.write_text("壞掉的內容", encoding="utf-8")
+            self.assertEqual(bot.load_locks(f), {})
+
+    def test_stale_lock_outside_list_is_released(self):
+        locks = {"OLDUSDT": "SHORT"}
+        api = _api(closes=self.UP)                                                  # OLD 也用同一份 K 線：已站回均線
+        asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
+        self.assertNotIn("OLDUSDT", locks)
