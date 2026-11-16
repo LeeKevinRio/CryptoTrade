@@ -437,3 +437,35 @@ class TestSymbolCapital(unittest.TestCase):
         rec = asyncio.run(bot.run_cycle(self._api(60), cfg, now_ms=NOW))[0]
         self.assertEqual(rec["action"], "skip")
         self.assertIn("可用餘額", rec["note"])
+
+
+class TestTopNTakeProfit(unittest.TestCase):
+    def _run(self, series, **kw):
+        import pandas as pd
+        from backtest import daily_trend as d
+        idx = pd.date_range("2024-01-01", periods=len(series), freq="D", tz="UTC")
+        closes = pd.DataFrame({"AUSDT": pd.Series(series, index=idx)})
+        qvol = pd.DataFrame({"AUSDT": 1.0}, index=idx)
+        uni = d.topn_universe(closes, qvol, top_n=1, min_age=90)
+        return d.topn_sma(closes, closes * 0, uni, top_n=1, mode="ls", **kw)
+
+    def test_short_tp_exits_once_and_stays_out(self):
+        import numpy as np
+        down = list(np.linspace(30, 10, 200))                       # 一路跌：空單獲利會超過 20%
+        base, tp = self._run(down), self._run(down, tp=0.2)
+        self.assertEqual(base.tp_exits, 0)
+        self.assertEqual(tp.tp_exits, 1)
+        self.assertEqual(tp.short_trades, 1)                        # 停利後沒站回均線 → 不再開空
+        self.assertGreater(base.daily.sum(), tp.daily.sum())        # 一路跌時停利賺得比較少
+
+    def test_short_tp_reenters_after_reclaim(self):
+        import numpy as np
+        s = list(np.linspace(30, 20, 120)) + [40.0] * 10 + list(np.linspace(40, 20, 120))
+        tp = self._run(s, tp=0.2)
+        self.assertGreaterEqual(tp.short_trades, 2)                 # 站回均線後再跌破 → 允許重新開空
+
+    def test_long_tp_only_with_both(self):
+        import numpy as np
+        up = list(np.linspace(10, 30, 200))
+        self.assertEqual(self._run(up, tp=0.2, tp_sides="short").tp_exits, 0)
+        self.assertEqual(self._run(up, tp=0.2, tp_sides="both").tp_exits, 1)
