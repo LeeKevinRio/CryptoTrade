@@ -452,6 +452,7 @@ def topn_sl_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFra
     run = lambda **kw: topn_sma(closes, funding, uni, top_n, mode="ls", **kw)   # noqa: E731
     rows = [("1 倍 不停利不停損（原本）", run()),
             (f"1 倍 空單停利 {tp:.0%}", run(tp=tp)),
+            (f"1 倍 空單停利 {tp:.0%} + 停損 20%", run(tp=tp, sl=0.20)),
             (f"{lev:g} 倍 不停利不停損", run(lev=lev)),
             (f"{lev:g} 倍 空單停利 {tp:.0%}、不停損", run(tp=tp, lev=lev))]
     sl_rows = [(f"{lev:g} 倍 空單停利 {tp:.0%} + {name}", run(tp=tp, sl=v, lev=lev), v) for name, v in SL_VARIANTS]
@@ -465,12 +466,12 @@ def topn_sl_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFra
     for name, r, _ in sl_rows:
         L.append(f"  {name:<22} {_stats(r)} | 停損 {r.sl_exits} 次、停利 {r.tp_exits} 次、強平 {r.liquidations} 次")
     L += ["", "  逐年（組合報酬）"]
-    cols = [rows[1], rows[3]] + [(n, r) for n, r, _ in sl_rows]
+    cols = [rows[1], rows[2], rows[4]] + [(n, r) for n, r, _ in sl_rows]
     for y in sorted({d.year for d in rows[0][1].daily.index}):
         sel = rows[0][1].daily.index.year == y
         L.append(f"    {y}  " + "   ".join(f"{n} {((1 + r.daily[sel]).prod() - 1) * 100:+.1f}%" for n, r in cols))
     best = max(sl_rows, key=lambda x: _metrics(x[1])[2])
-    no_sl = _metrics(rows[3][1])
+    no_sl = _metrics(rows[4][1])
     b = _metrics(best[1])
     better = (b[0] > no_sl[0]) + (b[1] < no_sl[1]) + (b[2] > no_sl[2])
     L += ["", f"  選出：{best[0]}（夏普最高）；與同槓桿不停損相比，年化／回撤／夏普三項中 {better} 項較好", "",
