@@ -43,8 +43,12 @@ DEFAULTS = {
     "mode": "long",             # long：只做多；ls：多空都做（跌破均線做空，站回均線回補）
     "symbol_capital": {},       # 個別標的的單筆保證金（U），覆蓋 capital_usdt / N；名目 = 保證金 × 槓桿
     "symbol_leverage": {},      # 個別標的的槓桿，覆蓋 leverage；例：{BTCUSDT: 2}
+    "take_profit_short_pct": 0,  # 空單收盤獲利達此 % 就停利（0＝不停利）；多單不設停利
+    "stop_loss_pct": 0,          # 多空單收盤虧損達此 % 就停損（0＝不停損）
+    "also_own_leverages": [],   # 這些槓桿的倉也視為本策略的（改槓桿前開的舊倉）；只管理到平倉，不會用它開新倉
 }
 LOG_CSV = Path("logs/daily_trend.csv")
+STATE_JSON = Path("logs/daily_trend_state.json")     # 停利／停損後的等待名單（唯一存在本機的狀態）
 
 
 # ── 純函式（可單元測試）─────────────────────────────────────────────────────
@@ -80,6 +84,40 @@ def desired_side(closes: list[float], sma_days: int, mode: str = "long") -> str 
     if mode == "ls" and closes[-1] < sma:
         return "SHORT"
     return "FLAT"
+
+
+def exit_rule(side: str, entry: float, close: float, cfg: dict) -> tuple[str, float] | None:
+    """停利／停損（與回測 topn_sma 的 tp／sl 一致，都看最新已收盤日 K）。
+    回傳 ("tp" 或 "sl", 損益 %)；不出場回傳 None"""
+    if not entry or side not in ("LONG", "SHORT"):
+        return None
+    pct = (close / entry - 1) * (1 if side == "LONG" else -1) * 100
+    tp, sl = float(cfg.get("take_profit_short_pct") or 0), float(cfg.get("stop_loss_pct") or 0)
+    eps = 1e-9                                        # 浮點誤差：剛好 20% 要算達標
+    if side == "SHORT" and tp > 0 and pct >= tp - eps:
+        return "tp", pct
+    if sl > 0 and pct <= -sl + eps:
+        return "sl", pct
+    return None
+
+
+EXIT_ACTION = {("tp", "SHORT"): "tp_cover", ("sl", "SHORT"): "sl_cover", ("sl", "LONG"): "sl_sell"}
+
+
+def load_locks(path: Path = STATE_JSON) -> dict[str, str]:
+    """{標的: "LONG"／"SHORT"}：該方向停利／停損後，等收盤回到均線另一側才允許再進場"""
+    try:
+        import json
+        return {k: v for k, v in json.loads(path.read_text(encoding="utf-8")).get("locks", {}).items()
+                if v in ("LONG", "SHORT")}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_locks(locks: dict[str, str], path: Path = STATE_JSON):
+    import json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"locks": locks}, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def floor_qty(qty: float, step: float) -> float:
@@ -122,12 +160,17 @@ def symbol_lev(cfg: dict, sym: str) -> int:
     return int((cfg.get("symbol_leverage") or {}).get(sym, cfg["leverage"]))
 
 
+def own_leverages(cfg: dict, sym: str) -> set[int]:
+    """本策略在該標的可能持有的槓桿：現行設定，加上 also_own_leverages（改槓桿前開的舊倉仍要管理）"""
+    return {symbol_lev(cfg, sym), *(int(x) for x in cfg.get("also_own_leverages") or [])}
+
+
 def own_symbols(positions: dict[str, dict], lev, mode: str = "long") -> list[str]:
-    """本策略的倉＝槓桿與設定相同、方向在本模式內（只做多：多單；多空：多單與空單）"""
+    """本策略的倉＝槓桿符合設定、方向在本模式內（只做多：多單；多空：多單與空單）"""
     sides = allowed_sides(mode)
-    lev_of = (lambda sym: symbol_lev(lev, sym)) if isinstance(lev, dict) else (lambda sym: lev)   # lev 可傳 cfg
+    levs_of = (lambda sym: own_leverages(lev, sym)) if isinstance(lev, dict) else (lambda sym: {lev})  # lev 可傳 cfg
     return [s for s, p in positions.items()
-            if p["side"] in sides and int(p.get("leverage", lev_of(s))) == lev_of(s)]
+            if p["side"] in sides and int(p.get("leverage", min(levs_of(s)))) in levs_of(s)]
 
 
 
@@ -176,10 +219,12 @@ async def available_usdt(api) -> float:
 # ── 一次判斷 ─────────────────────────────────────────────────────────────────
 
 async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = None,
-                    allow_buy: bool = True, tracker=None) -> list[dict]:
+                    allow_buy: bool = True, tracker=None, locks: dict[str, str] | None = None) -> list[dict]:
     """對每個標的判斷並（必要時）下單；回傳決策紀錄（反手時同一標的兩筆：先平倉、再開新倉）。
-    allow_buy=False（儀表板按了暫停）→ 不開新倉，但該平的照平。
-    tracker：有給就把開倉／平倉寫進資料庫（儀表板的交易紀錄與績效）。"""
+    allow_buy=False（儀表板按了暫停）→ 不開新倉，但該平的照平（含停利／停損）。
+    tracker：有給就把開倉／平倉寫進資料庫（儀表板的交易紀錄與績效）。
+    locks：停利／停損後的等待名單，會就地更新（只看模式不會改到呼叫端的那一份）。"""
+    locks = {} if locks is None else (dict(locks) if dry_run else locks)
     now_ms = now_ms or int(time.time() * 1000)
     mode = cfg.get("mode", "long")
     sides = allowed_sides(mode)
@@ -209,14 +254,42 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
             rec.update(base)
             pos = positions.get(sym)
             cur = pos["side"] if pos else "FLAT"
+            if want is not None and locks.get(sym) not in (None, want):
+                del locks[sym]                            # 收盤已回到均線另一側 → 解除等待
+            hit = (exit_rule(cur, float(pos.get("entry_price") or 0), closes[-1], cfg)
+                   if pos and want == cur and cur in sides
+                   and int(pos.get("leverage", lev)) in own_leverages(cfg, sym) else None)
 
             if want is None:
                 rec["action"] = "skip"
                 rec["note"] = f"日 K 不足 {cfg['sma_days']} 根"
-            elif pos and (pos["side"] not in sides or int(pos.get("leverage", lev)) != lev):
+            elif pos and (pos["side"] not in sides
+                          or int(pos.get("leverage", lev)) not in own_leverages(cfg, sym)):
                 # 不是本策略開的倉（例如舊機器人留下的 10 倍單）→ 不碰，避免誤平別人的倉
                 rec["action"] = "skip"
                 rec["note"] = f"已有非本策略的倉位（{pos['side']} {pos.get('leverage')}x），請先手動處理"
+            elif hit:
+                # ── 停利／停損：平倉後同方向先不再進場，等收盤回到均線另一側 ──
+                kind, pct = hit
+                label = "停利" if kind == "tp" else "停損"
+                limit = cfg["take_profit_short_pct"] if kind == "tp" else cfg["stop_loss_pct"]
+                rec.update(action=EXIT_ACTION[(kind, cur)], qty=pos["quantity"],
+                           note=f"{label}：收盤損益 {pct:+.1f}%（門檻 {float(limit):g}%）；"
+                                f"收盤{'站回' if cur == 'SHORT' else '跌破'}均線後才會再進場")
+                if not dry_run:
+                    await api.futures_market_order(sym, "SELL" if cur == "LONG" else "BUY",
+                                                   pos["quantity"], reduce_only=True)
+                    if tracker is not None:
+                        price = await api.get_ticker_price(sym)
+                        entry = float(pos["entry_price"])
+                        sign = 1 if cur == "LONG" else -1
+                        tracker.record_close(
+                            trade_id=None, symbol=sym, exit_price=price,
+                            pnl=round(sign * (price - entry) * pos["quantity"], 4),
+                            pnl_pct=round(sign * (price / entry - 1) * 100, 2),
+                            bot_id="futures", reason=f"{label} {float(limit):g}%")
+                locks[sym] = cur
+                avail = None
             elif cur == want:
                 rec["action"] = HOLD_ACTION[want]
                 if sym in extra and want != "FLAT":
@@ -244,7 +317,11 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                 if want != "FLAT":
                     # ── 開倉：站上均線做多／（多空模式）跌破均線做空 ──
                     rec = {**base}
-                    if sym in extra:
+                    if locks.get(sym) == want:
+                        rec["action"] = "wait"
+                        rec["note"] = ("停利／停損後等待中：收盤"
+                                       f"{'站回' if want == 'SHORT' else '跌破'}均線後才會再進場")
+                    elif sym in extra:
                         rec["action"] = "skip"
                         rec["note"] = f"已掉出成交量前 {cfg['top_volume']} 名：平倉後不再開新倉"
                     elif not allow_buy:
@@ -279,6 +356,15 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
             logger.error("%s 判斷／下單失敗: %s", sym, e)
         if rec is not None:
             emit(rec)
+    # 等待名單裡今天沒判斷到的幣（掉出名單）：只更新是否解除等待，不交易
+    for sym in [k for k in locks if k not in symbols]:
+        try:
+            kl = await api.get_klines(sym, "1d", limit=cfg["sma_days"] + 5)
+            want = desired_side(closed_closes(kl, now_ms), cfg["sma_days"], mode)
+            if want is not None and want != locks[sym]:
+                del locks[sym]
+        except Exception as e:  # noqa: BLE001 — 查不到就留到下次
+            logger.warning("%s 等待名單更新失敗: %s", sym, e)
     return out
 
 
@@ -314,6 +400,8 @@ async def amain(args):
     mode = "測試網" if b["testnet"] else "真金"
     universe = f"成交量前 {cfg['top_volume']} 名（每次判斷前更新）" if int(cfg["top_volume"] or 0) > 0 else cfg["symbols"]
     side_txt = "多空都做" if cfg.get("mode") == "ls" else "只做多"
+    side_txt += f"，空單停利 {float(cfg['take_profit_short_pct']):g}%" if cfg.get("take_profit_short_pct") else ""
+    side_txt += f"，停損 {float(cfg['stop_loss_pct']):g}%" if cfg.get("stop_loss_pct") else ""
     logger.info("日線均線機器人（%s%s）：%s，%s，均線 %d 天，投入 %.0fU，%dx",
                 mode, "・只看不下單" if args.dry_run else "", universe, side_txt,
                 cfg["sma_days"], float(cfg["capital_usdt"]), int(cfg["leverage"]))
@@ -334,12 +422,13 @@ async def amain(args):
             from src.web.app import create_app
             server = await _start_web(create_app(tracker=tracker), wcfg)
         last: dict[str, dict] = {}
+        locks = load_locks()
         while True:
             paused = dash.state.bots[dash.BOT_ID].paused
             try:
                 rows = await asyncio.wait_for(
                     run_cycle(api, cfg, dry_run=args.dry_run, allow_buy=not paused,
-                              tracker=None if args.dry_run else tracker), CYCLE_TIMEOUT_S)
+                              tracker=None if args.dry_run else tracker, locks=locks), CYCLE_TIMEOUT_S)
             except Exception as e:  # noqa: BLE001 — 網路斷線等：5 分鐘後重試，不要等到明天
                 if args.once:
                     raise
@@ -348,6 +437,8 @@ async def amain(args):
                 await asyncio.sleep(RETRY_CYCLE_S)
                 continue
             dash.state.engine_status["error"] = None
+            if not args.dry_run:
+                save_locks(locks)
             append_log(rows)
             active = [r["symbol"] for r in rows] or list(cfg["symbols"])
             dash.state.symbols = active

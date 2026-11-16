@@ -95,7 +95,8 @@ def check_decision(row: dict, klines: list[list], sma_days: int, mode: str = "lo
     return None
 
 
-ORDER_SIDE = {"buy": "BUY", "sell": "SELL", "short": "SELL", "cover": "BUY"}
+ORDER_SIDE = {"buy": "BUY", "sell": "SELL", "short": "SELL", "cover": "BUY",
+              "tp_cover": "BUY", "sl_cover": "BUY", "sl_sell": "SELL"}       # 停利／停損平倉
 
 
 def match_orders(orders: list[dict], log_rows: list[dict]) -> tuple[list, list[dict], list[dict]]:

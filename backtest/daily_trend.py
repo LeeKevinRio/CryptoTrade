@@ -216,16 +216,21 @@ class TopNResult(Result):
     short_up50: int = 0               # 空單期間收盤曾比進場價高 50% 以上的次數
     short_up90: int = 0               # 高 90% 以上（1 倍逐倉空單約在此被強平；只看收盤，盤中更早）
     tp_exits: int = 0                 # 停利出場次數
+    sl_exits: int = 0                 # 停損出場次數
+    liquidations: int = 0             # 逐倉強平次數（lev > 1）
 
 
 def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
              top_n: int, sma_days: int = 50, mode: str = "long",
-             tp: float | None = None, tp_sides: str = "short") -> TopNResult:
+             tp: float | None = None, tp_sides: str = "short",
+             sl: float | None = None, lev: float = 1.0) -> TopNResult:
     """與實盤一致：每幣固定 1/top_n 資金；收盤站上均線且當天在前 N 名 → 買進；
     已持有者不論是否掉出前 N 名，收盤跌破均線才賣（掉出名單不強制賣）。
     mode="ls"：另外在收盤跌破均線且當天在前 N 名時做空，收盤站回均線才回補（同日可多翻空）。
     tp：收盤獲利達 tp（例 0.2＝20%）就停利出場；停利後同方向不再進場，要等收盤回到均線另一側
-        （空單：站回均線；多單：跌破均線）之後才重新允許。tp_sides："short" 只對空單、"both" 多空都停利"""
+        （空單：站回均線；多單：跌破均線）之後才重新允許。tp_sides："short" 只對空單、"both" 多空都停利
+    sl：收盤虧損達 sl 就停損出場（多空都適用），之後同樣要等收盤回到均線另一側才允許同方向再進場
+    lev：槓桿（每幣名目 = lev / top_n）；lev > 1 時，收盤逆向達 0.9 / lev 視為逐倉強平出場"""
     c = closes.to_numpy(float)
     sma = closes.rolling(sma_days, min_periods=sma_days).mean().to_numpy(float)
     u = uni.reindex_like(closes).fillna(False).to_numpy(bool)
@@ -235,7 +240,7 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     entries = 0
     entry_px = np.full(N, np.nan)
     worst = np.zeros(N)
-    shorts = up50 = up90 = tp_exits = 0
+    shorts = up50 = up90 = tp_exits = sl_exits = liqs = 0
     lock_short, lock_long = np.zeros(N, bool), np.zeros(N, bool)
     for t in range(T):
         fin = np.isfinite(c[t])
@@ -259,6 +264,21 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
             lock_long |= tp_l
             exit_short |= tp_s
             exit_long |= tp_l
+        if sl or lev > 1:
+            with np.errstate(invalid="ignore"):
+                adv_s = np.where(cur == -1, c[t] / entry_px - 1, 0.0)       # 空單逆向幅度
+                adv_l = np.where(cur == 1, 1 - c[t] / entry_px, 0.0)        # 多單逆向幅度
+            adv_s, adv_l = np.nan_to_num(adv_s), np.nan_to_num(adv_l)
+            liq_s = (adv_s >= 0.9 / lev) if lev > 1 else np.zeros(N, bool)
+            liq_l = (adv_l >= 0.9 / lev) if lev > 1 else np.zeros(N, bool)
+            sl_s = (adv_s >= sl) if sl else np.zeros(N, bool)
+            sl_l = (adv_l >= sl) if sl else np.zeros(N, bool)
+            liqs += int((liq_s & ~sl_s).sum()) + int((liq_l & ~sl_l).sum())
+            sl_exits += int(sl_s.sum()) + int(sl_l.sum())
+            lock_short |= (sl_s | liq_s) & below
+            lock_long |= (sl_l | liq_l) & above
+            exit_short |= sl_s | liq_s
+            exit_long |= sl_l | liq_l
         for j in np.where(exit_short)[0]:
             up50 += worst[j] >= 1.5
             up90 += worst[j] >= 1.9
@@ -277,7 +297,7 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     prev = np.vstack([np.zeros(N), held[:-1]])
     ret = np.nan_to_num(closes.pct_change().to_numpy(float), nan=0.0, posinf=0.0, neginf=0.0)
     fund = np.nan_to_num(funding.reindex_like(closes).to_numpy(float), nan=0.0)
-    w = 1.0 / top_n
+    w = lev / top_n
     per = w * (prev * ret - np.abs(held - prev) * FEE - prev * fund)
     daily = pd.Series(per.sum(axis=1), index=closes.index)
     monthly = (1 + daily).groupby(daily.index.to_period("M")).prod() - 1
@@ -287,7 +307,7 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     exposure = np.abs(held).sum(axis=1)
     return TopNResult(monthly, contrib, daily, entries / weeks, float(exposure.mean()), int(exposure.max()),
                       float(per[side > 0].sum() * 100), float(per[side < 0].sum() * 100),
-                      shorts, int(up50), int(up90), tp_exits)
+                      shorts, int(up50), int(up90), tp_exits, sl_exits, liqs)
 
 
 def topn_buy_hold(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame, top_n: int) -> Result:
@@ -419,6 +439,47 @@ def topn_tp_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFra
     return "\n".join(L)
 
 
+SL_VARIANTS = [("停損 10%", 0.10), ("停損 15%", 0.15), ("停損 20%", 0.20)]
+
+
+def topn_sl_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFrame, top_n: int,
+                   lev: float = 2.0, tp: float = 0.20) -> str:
+    """事先定好：多空、空單停利 20%（已驗證）、槓桿 2 倍下，比較不停損與停損 10／15／20%；
+    停損幅度選夏普最高者；三種若都不如不停損，照實說明"""
+    uni = topn_universe(closes, qvol, top_n)
+    start = uni.any(axis=1).idxmax()
+    closes, funding, uni = closes.loc[start:], funding.loc[start:], uni.loc[start:]
+    run = lambda **kw: topn_sma(closes, funding, uni, top_n, mode="ls", **kw)   # noqa: E731
+    rows = [("1 倍 不停利不停損（原本）", run()),
+            (f"1 倍 空單停利 {tp:.0%}", run(tp=tp)),
+            (f"1 倍 空單停利 {tp:.0%} + 停損 20%", run(tp=tp, sl=0.20)),
+            (f"{lev:g} 倍 不停利不停損", run(lev=lev)),
+            (f"{lev:g} 倍 空單停利 {tp:.0%}、不停損", run(tp=tp, lev=lev))]
+    sl_rows = [(f"{lev:g} 倍 空單停利 {tp:.0%} + {name}", run(tp=tp, sl=v, lev=lev), v) for name, v in SL_VARIANTS]
+    L = [f"# 日線 50 均線 × 成交量前 {top_n} 名（多空）：{lev:g} 倍槓桿下的停損", "",
+         f"事先定好的規則：空單停利 {tp:.0%}（2026-11-16 已驗證）固定不變；停損＝收盤虧損達 X% 出場（多空都適用），"
+         "之後要等收盤回到均線另一側才允許同方向再進場。停損幅度選夏普最高者。"
+         f"{lev:g} 倍＝每幣名目為 1 倍的 {lev:g} 倍；收盤逆向達 {0.9 / lev:.0%} 視為逐倉強平。", "",
+         f"資料：{closes.index[0]:%Y-%m-%d} ~ {closes.index[-1]:%Y-%m-%d}；候選池 {closes.shape[1]} 個幣", "", "```"]
+    for name, r in rows:
+        L.append(f"  {name:<22} {_stats(r)} | 強平 {r.liquidations} 次")
+    for name, r, _ in sl_rows:
+        L.append(f"  {name:<22} {_stats(r)} | 停損 {r.sl_exits} 次、停利 {r.tp_exits} 次、強平 {r.liquidations} 次")
+    L += ["", "  逐年（組合報酬）"]
+    cols = [rows[1], rows[2], rows[4]] + [(n, r) for n, r, _ in sl_rows]
+    for y in sorted({d.year for d in rows[0][1].daily.index}):
+        sel = rows[0][1].daily.index.year == y
+        L.append(f"    {y}  " + "   ".join(f"{n} {((1 + r.daily[sel]).prod() - 1) * 100:+.1f}%" for n, r in cols))
+    best = max(sl_rows, key=lambda x: _metrics(x[1])[2])
+    no_sl = _metrics(rows[4][1])
+    b = _metrics(best[1])
+    better = (b[0] > no_sl[0]) + (b[1] < no_sl[1]) + (b[2] > no_sl[2])
+    L += ["", f"  選出：{best[0]}（夏普最高）；與同槓桿不停損相比，年化／回撤／夏普三項中 {better} 項較好", "",
+          f"  {best[0]} —— 上線關卡（3 組試驗校正）",
+          gate(_trades(best[1]), len(SL_VARIANTS), TOPN_CRITERIA, symbol_contrib=best[1].contrib).render(), "```"]
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description="日線長期順勢驗證")
     ap.add_argument("--months", type=int, default=86)
@@ -429,6 +490,7 @@ def main():
     ap.add_argument("--top-n", type=int, default=10)
     ap.add_argument("--ls", action="store_true", help="與 --top-symbols 併用：比較只做多 vs 多空都做")
     ap.add_argument("--tp", action="store_true", help="與 --top-symbols 併用：多空版要不要加停利")
+    ap.add_argument("--sl", action="store_true", help="與 --top-symbols 併用：2 倍槓桿 + 空單停利下的停損幅度")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -439,7 +501,8 @@ def main():
         syms = sorted({x.strip().upper() for x in args.top_symbols.split(",") if x.strip()} | set(DEV))
         closes, funding, qvol = daily_panel(syms, args.months)
         closes = closes.dropna(axis=1, how="all")
-        md = (topn_tp_report if args.tp else topn_ls_report if args.ls else topn_report)(
+        md = (topn_sl_report if args.sl else topn_tp_report if args.tp
+              else topn_ls_report if args.ls else topn_report)(
             closes, funding.reindex(columns=closes.columns), qvol.reindex(columns=closes.columns), args.top_n)
         print(md)
         if args.out:
