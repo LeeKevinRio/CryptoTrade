@@ -16,7 +16,8 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from src.daily_trend_bot import DEFAULTS, allowed_sides, closed_closes, desired_side, resolve_symbols
+from src.daily_trend_bot import (DEFAULTS, allowed_sides, closed_closes, desired_side, resolve_symbols,
+                                 symbol_lev)
 
 TW = timezone(timedelta(hours=8))
 INCOME_TYPES = ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE")
@@ -86,7 +87,7 @@ async def amain(days: int):
     config = load_config()
     cfg = {**DEFAULTS, **(config.get("daily_trend") or {})}
     b = config["binance"]
-    lev, sma_days, mode = int(cfg["leverage"]), int(cfg["sma_days"]), cfg.get("mode", "long")
+    sma_days, mode = int(cfg["sma_days"]), cfg.get("mode", "long")
     api = BinanceAPI(api_key=b["api_key"], api_secret=b["api_secret"], testnet=b["testnet"])
     await api.connect()
     try:
@@ -102,7 +103,8 @@ async def amain(days: int):
         if not positions:
             print("  （沒有持倉）")
         for p in positions.values():
-            mine = p["symbol"] in syms and p["side"] in allowed_sides(mode) and int(p["leverage"]) == lev
+            mine = (p["symbol"] in syms and p["side"] in allowed_sides(mode)
+                    and int(p["leverage"]) == symbol_lev(cfg, p["symbol"]))
             tag = "本策略" if mine else "★ 不是本策略（舊機器人留下的？）"
             print(f"  {p['symbol']:<14} {p['side']:<5} {p['leverage']}x  數量 {p['quantity']}  "
                   f"均價 {p['entry_price']}  未實現 {p['unrealized_pnl']:+.2f} U  {tag}")
@@ -118,12 +120,12 @@ async def amain(days: int):
             closes = closed_closes(kl, now_ms)
             want = desired_side(closes, sma_days, mode)
             if want is None:
-                print(f"  {sym:<10} {verdict(None, None, lev, mode)}")
+                print(f"  {sym:<10} {verdict(None, None, symbol_lev(cfg, sym), mode)}")
                 continue
             sma = sum(closes[-sma_days:]) / sma_days
             tag = "（已掉出名單，穿越均線才平倉）" if sym in extra else ""
             print(f"  {sym:<10}{tag} 收盤 {closes[-1]:,.6g}  均線 {sma:,.6g}（{(closes[-1] / sma - 1) * 100:+.2f}%）"
-                  f" → 應{SIDE_TXT[want]}｜{verdict(want, positions.get(sym), lev, mode)}")
+                  f" → 應{SIDE_TXT[want]}｜{verdict(want, positions.get(sym), symbol_lev(cfg, sym), mode)}")
     finally:
         await api.disconnect()
 

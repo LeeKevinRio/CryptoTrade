@@ -408,8 +408,64 @@ class TestSymbolCapital(unittest.TestCase):
         self.assertEqual((rec["action"], rec["qty"]), ("short", 0.003))      # 231U，最接近 200U
         api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.003)
 
+    def test_btc_2x_fits_small_balance(self):
+        """可用 77.91U：1 倍開不了 0.002 顆（約 131U），BTC 單獨 2 倍只要約 65U 保證金"""
+        api = _api(closes=(10, 10, 10, 10, 8, 1), price=65300.0)
+        api.get_symbol_info = AsyncMock(return_value=self.BTC_INFO)
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": "77.91"})
+        cfg = {**self.CFG25, "symbol_capital": {"BTCUSDT": 65}, "symbol_leverage": {"BTCUSDT": 2}}
+        rec = asyncio.run(bot.run_cycle(api, cfg, now_ms=NOW))[0]
+        self.assertEqual((rec["action"], rec["qty"]), ("short", 0.002))
+        api.set_leverage.assert_awaited_with("BTCUSDT", 2)
+        api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.002)
+
+    def test_btc_2x_position_is_own_and_others_stay_1x(self):
+        cfg = {**CFG, "mode": "ls", "symbols": ["BTCUSDT", "ETHUSDT"],
+               "symbol_capital": {"BTCUSDT": 65}, "symbol_leverage": {"BTCUSDT": 2}}
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 0.002, "entry_price": 65300, "leverage": 2},
+               {"symbol": "ETHUSDT", "side": "SHORT", "quantity": 0.011, "entry_price": 2200, "leverage": 2}]
+        api = _api(closes=(10, 10, 10, 10, 12, 1), positions=pos)         # 收盤站回均線
+        rows = asyncio.run(bot.run_cycle(api, cfg, now_ms=NOW, allow_buy=False))
+        acts = {(r["symbol"], r["action"]) for r in rows}
+        self.assertIn(("BTCUSDT", "cover"), acts)                         # 2 倍的 BTC 空單是本策略的 → 照規則回補
+        eth = next(r for r in rows if r["symbol"] == "ETHUSDT")
+        self.assertEqual(eth["action"], "skip")                           # ETH 設定是 1 倍，2 倍單不是本策略的
+        self.assertEqual(bot.own_symbols({p["symbol"]: p for p in pos}, cfg, "ls"), ["BTCUSDT"])
+
     def test_override_needs_balance(self):
         cfg = {**self.CFG25, "symbol_capital": {"BTCUSDT": 200}}
         rec = asyncio.run(bot.run_cycle(self._api(60), cfg, now_ms=NOW))[0]
         self.assertEqual(rec["action"], "skip")
         self.assertIn("可用餘額", rec["note"])
+
+
+class TestTopNTakeProfit(unittest.TestCase):
+    def _run(self, series, **kw):
+        import pandas as pd
+        from backtest import daily_trend as d
+        idx = pd.date_range("2024-01-01", periods=len(series), freq="D", tz="UTC")
+        closes = pd.DataFrame({"AUSDT": pd.Series(series, index=idx)})
+        qvol = pd.DataFrame({"AUSDT": 1.0}, index=idx)
+        uni = d.topn_universe(closes, qvol, top_n=1, min_age=90)
+        return d.topn_sma(closes, closes * 0, uni, top_n=1, mode="ls", **kw)
+
+    def test_short_tp_exits_once_and_stays_out(self):
+        import numpy as np
+        down = list(np.linspace(30, 10, 200))                       # 一路跌：空單獲利會超過 20%
+        base, tp = self._run(down), self._run(down, tp=0.2)
+        self.assertEqual(base.tp_exits, 0)
+        self.assertEqual(tp.tp_exits, 1)
+        self.assertEqual(tp.short_trades, 1)                        # 停利後沒站回均線 → 不再開空
+        self.assertGreater(base.daily.sum(), tp.daily.sum())        # 一路跌時停利賺得比較少
+
+    def test_short_tp_reenters_after_reclaim(self):
+        import numpy as np
+        s = list(np.linspace(30, 20, 120)) + [40.0] * 10 + list(np.linspace(40, 20, 120))
+        tp = self._run(s, tp=0.2)
+        self.assertGreaterEqual(tp.short_trades, 2)                 # 站回均線後再跌破 → 允許重新開空
+
+    def test_long_tp_only_with_both(self):
+        import numpy as np
+        up = list(np.linspace(10, 30, 200))
+        self.assertEqual(self._run(up, tp=0.2, tp_sides="short").tp_exits, 0)
+        self.assertEqual(self._run(up, tp=0.2, tp_sides="both").tp_exits, 1)
