@@ -511,3 +511,25 @@ class TestLeverageChange(unittest.TestCase):
         api = _api(closes=self.UP, positions=self._pos(1))
         rows = asyncio.run(bot.run_cycle(api, {**self.CFG2, "also_own_leverages": []}, now_ms=NOW))
         self.assertEqual(rows[0]["action"], "skip")
+
+
+class TestTopNStopLoss(unittest.TestCase):
+    _run = TestTopNTakeProfit._run
+
+    def test_short_sl_exits_and_waits_for_reclaim(self):
+        import numpy as np
+        # 第 90 天進名單時已遠低於均線（空在 10）→ 反彈到 11.5（+15%，仍在均線下）→ 停損；之後不再開空
+        s = [30.0] * 60 + list(np.linspace(30, 10, 20)) + [10.0] * 15 + [11.5] * 10
+        base, sl = self._run(s), self._run(s, sl=0.10)
+        self.assertEqual(base.sl_exits, 0)
+        self.assertEqual((sl.sl_exits, sl.short_trades), (1, 1))
+
+    def test_leverage_scales_returns_and_liquidates(self):
+        import numpy as np
+        down = list(np.linspace(30, 10, 200))
+        r1, r2 = self._run(down), self._run(down, lev=2.0)
+        self.assertAlmostEqual(r2.daily.sum(), 2 * r1.daily.sum(), places=6)
+        self.assertEqual(r1.liquidations, 0)
+        squeeze = list(np.linspace(30, 20, 150)) + [19.0, 36.0] + [19.0] * 20   # 一天暴漲，比進場價高 45% 以上
+        self.assertGreaterEqual(self._run(squeeze, lev=2.0).liquidations, 1)
+        self.assertEqual(self._run(squeeze).liquidations, 0)                     # 1 倍不模擬強平
