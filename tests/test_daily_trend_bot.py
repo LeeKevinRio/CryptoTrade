@@ -469,3 +469,45 @@ class TestTopNTakeProfit(unittest.TestCase):
         up = list(np.linspace(10, 30, 200))
         self.assertEqual(self._run(up, tp=0.2, tp_sides="short").tp_exits, 0)
         self.assertEqual(self._run(up, tp=0.2, tp_sides="both").tp_exits, 1)
+
+
+class TestLeverageChange(unittest.TestCase):
+    """2026-11-16：1 倍 → 2 倍。改之前開的 1 倍倉要繼續管理；新倉用 2 倍；舊機器人的 10 倍單照樣不碰"""
+
+    CFG2 = {**CFG, "mode": "ls", "symbols": ["BTCUSDT"], "capital_usdt": 100.0,
+            "leverage": 2, "also_own_leverages": [1]}
+    UP, DOWN = (10, 10, 10, 10, 12, 1), (10, 10, 10, 10, 8, 1)
+
+    def _pos(self, lev, side="SHORT"):
+        return [{"symbol": "BTCUSDT", "side": side, "quantity": 0.7, "entry_price": 90, "leverage": lev}]
+
+    def test_old_1x_short_still_managed(self):
+        api = _api(closes=self.DOWN, positions=self._pos(1))
+        rows = asyncio.run(bot.run_cycle(api, self.CFG2, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["hold_short"])      # 不加碼、不重開
+        api.futures_market_order.assert_not_awaited()
+
+    def test_old_1x_short_covers_then_reopens_at_2x(self):
+        api = _api(closes=self.UP, positions=self._pos(1))
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": "1000"})
+        rows = asyncio.run(bot.run_cycle(api, self.CFG2, now_ms=NOW))
+        self.assertEqual([r["action"] for r in rows], ["cover", "buy"])
+        self.assertEqual(rows[1]["qty"], 2.0)                               # 保證金 100U × 2 倍 ÷ 價格 100
+        api.set_leverage.assert_awaited_with("BTCUSDT", 2)
+
+    def test_margin_check_uses_leverage(self):
+        api = _api(closes=self.DOWN)
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": "101"})
+        rows = asyncio.run(bot.run_cycle(api, self.CFG2, now_ms=NOW))
+        self.assertEqual((rows[0]["action"], rows[0]["qty"]), ("short", 2.0))   # 名目 200U 只佔 100U 保證金
+
+    def test_10x_still_foreign(self):
+        api = _api(closes=self.UP, positions=self._pos(10))
+        rows = asyncio.run(bot.run_cycle(api, self.CFG2, now_ms=NOW))
+        self.assertEqual(rows[0]["action"], "skip")
+        api.futures_market_order.assert_not_awaited()
+
+    def test_without_also_own_1x_would_be_foreign(self):
+        api = _api(closes=self.UP, positions=self._pos(1))
+        rows = asyncio.run(bot.run_cycle(api, {**self.CFG2, "also_own_leverages": []}, now_ms=NOW))
+        self.assertEqual(rows[0]["action"], "skip")

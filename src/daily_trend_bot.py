@@ -43,6 +43,7 @@ DEFAULTS = {
     "mode": "long",             # long：只做多；ls：多空都做（跌破均線做空，站回均線回補）
     "symbol_capital": {},       # 個別標的的單筆保證金（U），覆蓋 capital_usdt / N；名目 = 保證金 × 槓桿
     "symbol_leverage": {},      # 個別標的的槓桿，覆蓋 leverage；例：{BTCUSDT: 2}
+    "also_own_leverages": [],   # 這些槓桿的倉也視為本策略的（改槓桿前開的舊倉）；只管理到平倉，不會用它開新倉
 }
 LOG_CSV = Path("logs/daily_trend.csv")
 
@@ -122,12 +123,17 @@ def symbol_lev(cfg: dict, sym: str) -> int:
     return int((cfg.get("symbol_leverage") or {}).get(sym, cfg["leverage"]))
 
 
+def own_leverages(cfg: dict, sym: str) -> set[int]:
+    """本策略在該標的可能持有的槓桿：現行設定，加上 also_own_leverages（改槓桿前開的舊倉仍要管理）"""
+    return {symbol_lev(cfg, sym), *(int(x) for x in cfg.get("also_own_leverages") or [])}
+
+
 def own_symbols(positions: dict[str, dict], lev, mode: str = "long") -> list[str]:
-    """本策略的倉＝槓桿與設定相同、方向在本模式內（只做多：多單；多空：多單與空單）"""
+    """本策略的倉＝槓桿符合設定、方向在本模式內（只做多：多單；多空：多單與空單）"""
     sides = allowed_sides(mode)
-    lev_of = (lambda sym: symbol_lev(lev, sym)) if isinstance(lev, dict) else (lambda sym: lev)   # lev 可傳 cfg
+    levs_of = (lambda sym: own_leverages(lev, sym)) if isinstance(lev, dict) else (lambda sym: {lev})  # lev 可傳 cfg
     return [s for s, p in positions.items()
-            if p["side"] in sides and int(p.get("leverage", lev_of(s))) == lev_of(s)]
+            if p["side"] in sides and int(p.get("leverage", min(levs_of(s)))) in levs_of(s)]
 
 
 
@@ -213,7 +219,8 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
             if want is None:
                 rec["action"] = "skip"
                 rec["note"] = f"日 K 不足 {cfg['sma_days']} 根"
-            elif pos and (pos["side"] not in sides or int(pos.get("leverage", lev)) != lev):
+            elif pos and (pos["side"] not in sides
+                          or int(pos.get("leverage", lev)) not in own_leverages(cfg, sym)):
                 # 不是本策略開的倉（例如舊機器人留下的 10 倍單）→ 不碰，避免誤平別人的倉
                 rec["action"] = "skip"
                 rec["note"] = f"已有非本策略的倉位（{pos['side']} {pos.get('leverage')}x），請先手動處理"

@@ -16,8 +16,8 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from src.daily_trend_bot import (DEFAULTS, allowed_sides, closed_closes, desired_side, resolve_symbols,
-                                 symbol_lev)
+from src.daily_trend_bot import (DEFAULTS, allowed_sides, closed_closes, desired_side, own_leverages,
+                                 resolve_symbols)
 
 TW = timezone(timedelta(hours=8))
 INCOME_TYPES = ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE")
@@ -40,13 +40,14 @@ def summarize_income(rows: list[dict], strategy_symbols: list[str]) -> dict:
 SIDE_TXT = {"LONG": "多單", "SHORT": "空單", "FLAT": "空手"}
 
 
-def verdict(want, pos: dict | None, lev: int, mode: str = "long") -> str:
+def verdict(want, pos: dict | None, lev, mode: str = "long") -> str:
     """策略應有狀態（LONG／SHORT／FLAT；舊呼叫可傳 True＝LONG、False＝FLAT）vs 帳戶實際持倉"""
     if want is None:
         return "資料不足，無法判斷"
     if isinstance(want, bool):
         want = "LONG" if want else "FLAT"
-    if pos and (pos["side"] not in allowed_sides(mode) or int(pos.get("leverage", lev)) != lev):
+    levs = lev if isinstance(lev, set) else {lev}                   # lev：單一槓桿或本策略可能持有的槓桿集合
+    if pos and (pos["side"] not in allowed_sides(mode) or int(pos.get("leverage", min(levs))) not in levs):
         return f"⚠ 帳上是 {pos['side']} {pos.get('leverage')}x，不是本策略的倉（舊機器人留下的？）"
     have = pos["side"] if pos else "FLAT"
     if have == want:
@@ -104,7 +105,7 @@ async def amain(days: int):
             print("  （沒有持倉）")
         for p in positions.values():
             mine = (p["symbol"] in syms and p["side"] in allowed_sides(mode)
-                    and int(p["leverage"]) == symbol_lev(cfg, p["symbol"]))
+                    and int(p["leverage"]) in own_leverages(cfg, p["symbol"]))
             tag = "本策略" if mine else "★ 不是本策略（舊機器人留下的？）"
             print(f"  {p['symbol']:<14} {p['side']:<5} {p['leverage']}x  數量 {p['quantity']}  "
                   f"均價 {p['entry_price']}  未實現 {p['unrealized_pnl']:+.2f} U  {tag}")
@@ -120,12 +121,12 @@ async def amain(days: int):
             closes = closed_closes(kl, now_ms)
             want = desired_side(closes, sma_days, mode)
             if want is None:
-                print(f"  {sym:<10} {verdict(None, None, symbol_lev(cfg, sym), mode)}")
+                print(f"  {sym:<10} {verdict(None, None, own_leverages(cfg, sym), mode)}")
                 continue
             sma = sum(closes[-sma_days:]) / sma_days
             tag = "（已掉出名單，穿越均線才平倉）" if sym in extra else ""
             print(f"  {sym:<10}{tag} 收盤 {closes[-1]:,.6g}  均線 {sma:,.6g}（{(closes[-1] / sma - 1) * 100:+.2f}%）"
-                  f" → 應{SIDE_TXT[want]}｜{verdict(want, positions.get(sym), symbol_lev(cfg, sym), mode)}")
+                  f" → 應{SIDE_TXT[want]}｜{verdict(want, positions.get(sym), own_leverages(cfg, sym), mode)}")
     finally:
         await api.disconnect()
 
