@@ -41,7 +41,8 @@ DEFAULTS = {
     "top_volume": 0,            # > 0 → 每次判斷前改用「過去 30 天成交額前 N 名」取代 symbols
     "min_listed_days": 90,      # 名單只收上市滿 90 天的幣（與回測一致）
     "mode": "long",             # long：只做多；ls：多空都做（跌破均線做空，站回均線回補）
-    "symbol_capital": {},       # 個別標的的單筆金額（U），覆蓋 capital_usdt / N；例：{BTCUSDT: 200}
+    "symbol_capital": {},       # 個別標的的單筆保證金（U），覆蓋 capital_usdt / N；名目 = 保證金 × 槓桿
+    "symbol_leverage": {},      # 個別標的的槓桿，覆蓋 leverage；例：{BTCUSDT: 2}
 }
 LOG_CSV = Path("logs/daily_trend.csv")
 
@@ -116,10 +117,17 @@ def avg_quote_volume(klines: list[list], now_ms: int, days: int = 30) -> float:
     return sum(vols) / len(vols) if vols else 0.0
 
 
-def own_symbols(positions: dict[str, dict], lev: int, mode: str = "long") -> list[str]:
+def symbol_lev(cfg: dict, sym: str) -> int:
+    """該標的的槓桿：symbol_leverage 有指定就用它，否則用 leverage"""
+    return int((cfg.get("symbol_leverage") or {}).get(sym, cfg["leverage"]))
+
+
+def own_symbols(positions: dict[str, dict], lev, mode: str = "long") -> list[str]:
     """本策略的倉＝槓桿與設定相同、方向在本模式內（只做多：多單；多空：多單與空單）"""
     sides = allowed_sides(mode)
-    return [s for s, p in positions.items() if p["side"] in sides and int(p.get("leverage", lev)) == lev]
+    lev_of = (lambda sym: symbol_lev(lev, sym)) if isinstance(lev, dict) else (lambda sym: lev)   # lev 可傳 cfg
+    return [s for s, p in positions.items()
+            if p["side"] in sides and int(p.get("leverage", lev_of(s))) == lev_of(s)]
 
 
 
@@ -129,7 +137,7 @@ async def resolve_symbols(api, cfg: dict, positions: dict[str, dict],
     top_volume > 0：先以 24h 成交額取 3N 個候選，再用過去 30 天平均成交額排出前 N 名（與回測一致）；
     持有中但掉出名單者照樣判斷 —— 只會在跌破均線時賣出，不會加碼。"""
     n = int(cfg.get("top_volume") or 0)
-    held = own_symbols(positions, int(cfg["leverage"]), cfg.get("mode", "long"))
+    held = own_symbols(positions, cfg, cfg.get("mode", "long"))
     base = list(cfg["symbols"])
     cache: dict[str, list] = {}
     if n > 0:
@@ -173,7 +181,6 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
     allow_buy=False（儀表板按了暫停）→ 不開新倉，但該平的照平。
     tracker：有給就把開倉／平倉寫進資料庫（儀表板的交易紀錄與績效）。"""
     now_ms = now_ms or int(time.time() * 1000)
-    lev = int(cfg["leverage"])
     mode = cfg.get("mode", "long")
     sides = allowed_sides(mode)
     positions = {p["symbol"]: p for p in await api.get_open_positions()}
@@ -192,6 +199,7 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
     for sym in symbols:
         base = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": sym}
         rec = dict(base)
+        lev = symbol_lev(cfg, sym)
         try:
             kl = cache.get(sym) or await api.get_klines(sym, "1d", limit=cfg["sma_days"] + 5)
             closes = closed_closes(kl, now_ms)

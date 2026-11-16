@@ -408,6 +408,30 @@ class TestSymbolCapital(unittest.TestCase):
         self.assertEqual((rec["action"], rec["qty"]), ("short", 0.003))      # 231U，最接近 200U
         api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.003)
 
+    def test_btc_2x_fits_small_balance(self):
+        """可用 77.91U：1 倍開不了 0.002 顆（約 131U），BTC 單獨 2 倍只要約 65U 保證金"""
+        api = _api(closes=(10, 10, 10, 10, 8, 1), price=65300.0)
+        api.get_symbol_info = AsyncMock(return_value=self.BTC_INFO)
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": "77.91"})
+        cfg = {**self.CFG25, "symbol_capital": {"BTCUSDT": 65}, "symbol_leverage": {"BTCUSDT": 2}}
+        rec = asyncio.run(bot.run_cycle(api, cfg, now_ms=NOW))[0]
+        self.assertEqual((rec["action"], rec["qty"]), ("short", 0.002))
+        api.set_leverage.assert_awaited_with("BTCUSDT", 2)
+        api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.002)
+
+    def test_btc_2x_position_is_own_and_others_stay_1x(self):
+        cfg = {**CFG, "mode": "ls", "symbols": ["BTCUSDT", "ETHUSDT"],
+               "symbol_capital": {"BTCUSDT": 65}, "symbol_leverage": {"BTCUSDT": 2}}
+        pos = [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 0.002, "entry_price": 65300, "leverage": 2},
+               {"symbol": "ETHUSDT", "side": "SHORT", "quantity": 0.011, "entry_price": 2200, "leverage": 2}]
+        api = _api(closes=(10, 10, 10, 10, 12, 1), positions=pos)         # 收盤站回均線
+        rows = asyncio.run(bot.run_cycle(api, cfg, now_ms=NOW, allow_buy=False))
+        acts = {(r["symbol"], r["action"]) for r in rows}
+        self.assertIn(("BTCUSDT", "cover"), acts)                         # 2 倍的 BTC 空單是本策略的 → 照規則回補
+        eth = next(r for r in rows if r["symbol"] == "ETHUSDT")
+        self.assertEqual(eth["action"], "skip")                           # ETH 設定是 1 倍，2 倍單不是本策略的
+        self.assertEqual(bot.own_symbols({p["symbol"]: p for p in pos}, cfg, "ls"), ["BTCUSDT"])
+
     def test_override_needs_balance(self):
         cfg = {**self.CFG25, "symbol_capital": {"BTCUSDT": 200}}
         rec = asyncio.run(bot.run_cycle(self._api(60), cfg, now_ms=NOW))[0]
