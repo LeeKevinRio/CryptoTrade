@@ -105,16 +105,19 @@ def exit_rule(side: str, entry: float, close: float, cfg: dict) -> tuple[str, fl
 EXIT_ACTION = {("tp", "SHORT"): "tp_cover", ("sl", "SHORT"): "sl_cover", ("sl", "LONG"): "sl_sell"}
 
 
-def load_locks(path: Path = STATE_JSON, drop_legacy: bool = False) -> dict[str, str]:
-    """{標的: "LONG"／"SHORT"}：該方向停利／停損後，等收盤回到均線另一側才允許再進場。
-    drop_legacy：停利不再等待（lock_after_take_profit: false）時，丟掉舊版檔案的名單 ——
-    舊版（沒有 version）只可能是「停利後等待」留下的"""
+def lock_side(v: str | None) -> str | None:
+    """等待名單的值："SHORT"／"LONG"＝停利後等待；"SHORT@sl"／"LONG@sl"＝停損後等待。回傳方向"""
+    return v.split("@")[0] if v else None
+
+
+def load_locks(path: Path = STATE_JSON, drop_tp: bool = False) -> dict[str, str]:
+    """{標的: 方向（停損另加 "@sl"）}：該方向停利／停損後，等收盤回到均線另一側才允許再進場。
+    drop_tp：停利不再等待（lock_after_take_profit: false）時，丟掉停利留下的等待，只保留停損的"""
     try:
         import json
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if drop_legacy and "version" not in data:
-            return {}
-        return {k: v for k, v in data.get("locks", {}).items() if v in ("LONG", "SHORT")}
+        locks = {k: v for k, v in json.loads(path.read_text(encoding="utf-8")).get("locks", {}).items()
+                 if isinstance(v, str) and lock_side(v) in ("LONG", "SHORT")}
+        return {k: v for k, v in locks.items() if v.endswith("@sl")} if drop_tp else locks
     except (OSError, ValueError):
         return {}
 
@@ -122,7 +125,7 @@ def load_locks(path: Path = STATE_JSON, drop_legacy: bool = False) -> dict[str, 
 def save_locks(locks: dict[str, str], path: Path = STATE_JSON):
     import json
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"version": 2, "locks": locks}, ensure_ascii=False, indent=1), encoding="utf-8")
+    path.write_text(json.dumps({"locks": locks}, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def floor_qty(qty: float, step: float) -> float:
@@ -250,7 +253,7 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
         """開倉：站上均線做多／（多空模式）跌破均線做空；不能開就回傳說明原因的紀錄"""
         nonlocal avail
         rec = {**base}
-        if locks.get(sym) == want:
+        if lock_side(locks.get(sym)) == want:
             rec["action"] = "wait"
             rec["note"] = ("停利／停損後等待中：收盤"
                            f"{'站回' if want == 'SHORT' else '跌破'}均線後才會再進場")
@@ -299,7 +302,7 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
             rec.update(base)
             pos = positions.get(sym)
             cur = pos["side"] if pos else "FLAT"
-            if want is not None and locks.get(sym) not in (None, want):
+            if want is not None and lock_side(locks.get(sym)) not in (None, want):
                 del locks[sym]                            # 收盤已回到均線另一側 → 解除等待
             hit = (exit_rule(cur, float(pos.get("entry_price") or 0), closes[-1], cfg)
                    if pos and want == cur and cur in sides
@@ -342,7 +345,7 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                     emit(rec)
                     rec = await open_new(sym, base, want, lev)
                 else:
-                    locks[sym] = cur
+                    locks[sym] = cur if kind == "tp" else f"{cur}@sl"
             elif cur == want:
                 rec["action"] = HOLD_ACTION[want]
                 if sym in extra and want != "FLAT":
@@ -379,7 +382,7 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
         try:
             kl = await api.get_klines(sym, "1d", limit=cfg["sma_days"] + 5)
             want = desired_side(closed_closes(kl, now_ms), cfg["sma_days"], mode)
-            if want is not None and want != locks[sym]:
+            if want is not None and want != lock_side(locks[sym]):
                 del locks[sym]
         except Exception as e:  # noqa: BLE001 — 查不到就留到下次
             logger.warning("%s 等待名單更新失敗: %s", sym, e)
@@ -441,7 +444,7 @@ async def amain(args):
             from src.web.app import create_app
             server = await _start_web(create_app(tracker=tracker), wcfg)
         last: dict[str, dict] = {}
-        locks = load_locks(drop_legacy=not cfg.get("lock_after_take_profit", True))
+        locks = load_locks(drop_tp=not cfg.get("lock_after_take_profit", True))
         while True:
             paused = dash.state.bots[dash.BOT_ID].paused
             try:

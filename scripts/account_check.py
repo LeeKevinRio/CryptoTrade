@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from src.daily_trend_bot import (DEFAULTS, allowed_sides, closed_closes, desired_side, load_locks,
+from src.daily_trend_bot import (DEFAULTS, allowed_sides, closed_closes, desired_side, load_locks, lock_side,
                                  own_leverages, resolve_symbols)
 
 TW = timezone(timedelta(hours=8))
@@ -115,7 +115,7 @@ async def amain(days: int):
         print(f"\n── 近 {days} 天幣安實際入帳：其他標的 ──")
         print("\n".join(_fmt_income(income["other"])))
 
-        locks = load_locks(drop_legacy=not cfg.get("lock_after_take_profit", True))
+        locks = load_locks(drop_tp=not cfg.get("lock_after_take_profit", True))
         print(f"\n── 策略比對（最新已收盤日 K vs {sma_days} 日均線，日 K 於台灣 08:00 收盤）──")
         for sym in syms:
             kl = cache.get(sym) or await api.get_klines(sym, "1d", limit=sma_days + 5)
@@ -127,7 +127,7 @@ async def amain(days: int):
             sma = sum(closes[-sma_days:]) / sma_days
             tag = "（已掉出名單，穿越均線才平倉）" if sym in extra else ""
             v = verdict(want, positions.get(sym), own_leverages(cfg, sym), mode)
-            if locks.get(sym) == want and sym not in positions:
+            if lock_side(locks.get(sym)) == want and sym not in positions:
                 v = "✓ 停利／停損後等待中：收盤回到均線另一側才會再進場"
             print(f"  {sym:<10}{tag} 收盤 {closes[-1]:,.6g}  均線 {sma:,.6g}（{(closes[-1] / sma - 1) * 100:+.2f}%）"
                   f" → 應{SIDE_TXT[want]}｜{v}")

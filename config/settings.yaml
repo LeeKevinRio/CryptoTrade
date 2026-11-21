@@ -292,9 +292,10 @@ daily_trend:
   # 驗證：reports/daily-trend-top10-tp-2026-11-16.md（停利）、daily-trend-top10-sl-2026-11-16.md（停損）
   take_profit_short_pct: 20
   stop_loss_pct: 20
-  # 使用者決定（2026-11-21）：停利後不等待，條件仍成立（收盤在均線下、在名單內）就立刻用現價重新開空。
-  # 停損後照樣等收盤回到均線另一側。驗證：reports/daily-trend-top10-reentry-2026-11-21.md
-  lock_after_take_profit: false
+  # 停利後是否等收盤回到均線另一側才再進場。false＝條件仍成立就立刻用現價重新開空（停損後照樣等待）。
+  # 2026-11-21 使用者要求改為 false，但回測（reports/daily-trend-top10-reentry-2026-11-21.md）顯示
+  # 2 倍下不等待年化 -30.6%、累計 -88%（等待：+18.7%）；1 倍 +2.1%（等待：+24.6%）→ 先維持 true，待使用者確認
+  lock_after_take_profit: true
   margin_type: ISOLATED
   # 每天判斷時間（UTC）。日 K 於 UTC 00:00（台灣 08:00）收盤；任何時間檢查都只看「已收盤」的日 K，
   # 判斷結果與 08:05 相同，只是下單晚幾小時。14:00 UTC = 台灣晚上 22:00（使用者電腦較常開著的時段）

@@ -581,7 +581,7 @@ class TestTakeProfitStopLoss(unittest.TestCase):
         rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
         self.assertEqual(rows[0]["action"], "sl_cover")
         self.assertIn("停損", rows[0]["note"])
-        self.assertEqual(locks, {"BTCUSDT": "SHORT"})
+        self.assertEqual(locks, {"BTCUSDT": "SHORT@sl"})
 
     def test_long_stop_loss(self):
         pos = [{"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.7, "entry_price": 15, "leverage": 1}]
@@ -590,7 +590,7 @@ class TestTakeProfitStopLoss(unittest.TestCase):
         rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
         self.assertEqual(rows[0]["action"], "sl_sell")
         api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.7, reduce_only=True)
-        self.assertEqual(locks, {"BTCUSDT": "LONG"})
+        self.assertEqual(locks, {"BTCUSDT": "LONG@sl"})
 
     def test_no_exit_within_thresholds(self):
         api = _api(closes=self.DOWN, positions=self._short(9))                      # +11%：繼續抱
@@ -677,7 +677,9 @@ class TestReenterAfterTakeProfit(unittest.TestCase):
         api = _api(closes=self.DOWN, positions=self._short(6.5))                    # -23%
         rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
         self.assertEqual([r["action"] for r in rows], ["sl_cover"])
-        self.assertEqual(locks, {"BTCUSDT": "SHORT"})
+        self.assertEqual(locks, {"BTCUSDT": "SHORT@sl"})
+        api2 = _api(closes=self.DOWN)                                               # 停損後仍在均線下 → 等待
+        self.assertEqual(asyncio.run(bot.run_cycle(api2, self.C, now_ms=NOW, locks=locks))[0]["action"], "wait")
 
     def test_paused_tp_does_not_reopen(self):
         api = _api(closes=self.DOWN, positions=self._short(10))
@@ -690,17 +692,16 @@ class TestReenterAfterTakeProfit(unittest.TestCase):
         self.assertEqual([r["action"] for r in rows], ["tp_cover", "short"])
         api.futures_market_order.assert_not_awaited()
 
-    def test_legacy_tp_locks_dropped(self):
-        import json
+    def test_tp_locks_dropped_sl_locks_kept(self):
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "state.json"
-            f.write_text(json.dumps({"locks": {"ETHUSDT": "SHORT"}}), encoding="utf-8")     # 舊版：停利留下的
-            self.assertEqual(bot.load_locks(f, drop_legacy=True), {})
-            self.assertEqual(bot.load_locks(f), {"ETHUSDT": "SHORT"})
-            bot.save_locks({"SOLUSDT": "SHORT"}, f)                                          # 新版：停損留下的
-            self.assertEqual(bot.load_locks(f, drop_legacy=True), {"SOLUSDT": "SHORT"})
+            bot.save_locks({"ETHUSDT": "SHORT", "SOLUSDT": "SHORT@sl"}, f)          # 停利留下的、停損留下的
+            self.assertEqual(bot.load_locks(f), {"ETHUSDT": "SHORT", "SOLUSDT": "SHORT@sl"})
+            self.assertEqual(bot.load_locks(f, drop_tp=True), {"SOLUSDT": "SHORT@sl"})
+        self.assertEqual(bot.lock_side("SHORT@sl"), "SHORT")
+        self.assertIsNone(bot.lock_side(None))
 
 
 class TestTopNReentry(unittest.TestCase):
