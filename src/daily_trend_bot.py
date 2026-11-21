@@ -45,6 +45,7 @@ DEFAULTS = {
     "symbol_leverage": {},      # 個別標的的槓桿，覆蓋 leverage；例：{BTCUSDT: 2}
     "take_profit_short_pct": 0,  # 空單收盤獲利達此 % 就停利（0＝不停利）；多單不設停利
     "stop_loss_pct": 0,          # 多空單收盤虧損達此 % 就停損（0＝不停損）
+    "lock_after_take_profit": True,   # 停利後是否等收盤回到均線另一側才再進場；False＝條件成立就立刻重新進場
     "also_own_leverages": [],   # 這些槓桿的倉也視為本策略的（改槓桿前開的舊倉）；只管理到平倉，不會用它開新倉
 }
 LOG_CSV = Path("logs/daily_trend.csv")
@@ -104,12 +105,16 @@ def exit_rule(side: str, entry: float, close: float, cfg: dict) -> tuple[str, fl
 EXIT_ACTION = {("tp", "SHORT"): "tp_cover", ("sl", "SHORT"): "sl_cover", ("sl", "LONG"): "sl_sell"}
 
 
-def load_locks(path: Path = STATE_JSON) -> dict[str, str]:
-    """{標的: "LONG"／"SHORT"}：該方向停利／停損後，等收盤回到均線另一側才允許再進場"""
+def load_locks(path: Path = STATE_JSON, drop_legacy: bool = False) -> dict[str, str]:
+    """{標的: "LONG"／"SHORT"}：該方向停利／停損後，等收盤回到均線另一側才允許再進場。
+    drop_legacy：停利不再等待（lock_after_take_profit: false）時，丟掉舊版檔案的名單 ——
+    舊版（沒有 version）只可能是「停利後等待」留下的"""
     try:
         import json
-        return {k: v for k, v in json.loads(path.read_text(encoding="utf-8")).get("locks", {}).items()
-                if v in ("LONG", "SHORT")}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if drop_legacy and "version" not in data:
+            return {}
+        return {k: v for k, v in data.get("locks", {}).items() if v in ("LONG", "SHORT")}
     except (OSError, ValueError):
         return {}
 
@@ -117,7 +122,7 @@ def load_locks(path: Path = STATE_JSON) -> dict[str, str]:
 def save_locks(locks: dict[str, str], path: Path = STATE_JSON):
     import json
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"locks": locks}, ensure_ascii=False, indent=1), encoding="utf-8")
+    path.write_text(json.dumps({"version": 2, "locks": locks}, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def floor_qty(qty: float, step: float) -> float:
@@ -241,6 +246,46 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                     rec.get("sma"), rec.get("note", ""))
         out.append(rec)
 
+    async def open_new(sym, base, want, lev):
+        """開倉：站上均線做多／（多空模式）跌破均線做空；不能開就回傳說明原因的紀錄"""
+        nonlocal avail
+        rec = {**base}
+        if locks.get(sym) == want:
+            rec["action"] = "wait"
+            rec["note"] = ("停利／停損後等待中：收盤"
+                           f"{'站回' if want == 'SHORT' else '跌破'}均線後才會再進場")
+        elif sym in extra:
+            rec["action"] = "skip"
+            rec["note"] = f"已掉出成交量前 {cfg['top_volume']} 名：平倉後不再開新倉"
+        elif not allow_buy:
+            rec["action"] = "skip"
+            rec["note"] = "已暫停（儀表板），不開新倉"
+        else:
+            price = await api.get_ticker_price(sym)
+            step, min_notional = symbol_filters(await api.get_symbol_info(sym))
+            budget = float((cfg.get("symbol_capital") or {}).get(sym, per_symbol))
+            qty = fit_qty(budget * lev, price, step)
+            if avail is None:
+                avail = await available_usdt(api)
+            if qty * price < min_notional:
+                rec["action"] = "skip"
+                rec["note"] = f"金額 {budget:.2f}U 低於最小下單 {min_notional}U"
+            elif qty * price / lev > avail:
+                rec["action"] = "skip"
+                rec["note"] = f"可用餘額 {avail:.2f}U 不足 {qty * price / lev:.2f}U"
+            else:
+                rec.update(action="buy" if want == "LONG" else "short", qty=qty, price=price)
+                avail -= qty * price / lev
+                if not dry_run:
+                    await api.set_margin_type(sym, cfg["margin_type"])
+                    await api.set_leverage(sym, lev)
+                    await api.futures_market_order(sym, "BUY" if want == "LONG" else "SELL", qty)
+                    if tracker is not None:
+                        tracker.record_open({"bot_id": "futures", "mode": "futures", "symbol": sym,
+                                             "side": want, "entry_price": price, "quantity": qty,
+                                             "strategy": STRATEGY_NAME[mode]})
+        return rec
+
     for sym in symbols:
         base = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": sym}
         rec = dict(base)
@@ -269,13 +314,17 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                 rec["action"] = "skip"
                 rec["note"] = f"已有非本策略的倉位（{pos['side']} {pos.get('leverage')}x），請先手動處理"
             elif hit:
-                # ── 停利／停損：平倉後同方向先不再進場，等收盤回到均線另一側 ──
+                # ── 停利／停損 ──
+                # 停損：同方向先不再進場，等收盤回到均線另一側。
+                # 停利：lock_after_take_profit 為 False 時不等待，條件仍成立就立刻用現價重新進場
                 kind, pct = hit
                 label = "停利" if kind == "tp" else "停損"
                 limit = cfg["take_profit_short_pct"] if kind == "tp" else cfg["stop_loss_pct"]
+                reopen = kind == "tp" and not cfg.get("lock_after_take_profit", True)
+                after = ("條件仍成立，立刻重新進場" if reopen
+                         else f"收盤{'站回' if cur == 'SHORT' else '跌破'}均線後才會再進場")
                 rec.update(action=EXIT_ACTION[(kind, cur)], qty=pos["quantity"],
-                           note=f"{label}：收盤損益 {pct:+.1f}%（門檻 {float(limit):g}%）；"
-                                f"收盤{'站回' if cur == 'SHORT' else '跌破'}均線後才會再進場")
+                           note=f"{label}：收盤損益 {pct:+.1f}%（門檻 {float(limit):g}%）；{after}")
                 if not dry_run:
                     await api.futures_market_order(sym, "SELL" if cur == "LONG" else "BUY",
                                                    pos["quantity"], reduce_only=True)
@@ -288,8 +337,12 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                             pnl=round(sign * (price - entry) * pos["quantity"], 4),
                             pnl_pct=round(sign * (price / entry - 1) * 100, 2),
                             bot_id="futures", reason=f"{label} {float(limit):g}%")
-                locks[sym] = cur
                 avail = None
+                if reopen:
+                    emit(rec)
+                    rec = await open_new(sym, base, want, lev)
+                else:
+                    locks[sym] = cur
             elif cur == want:
                 rec["action"] = HOLD_ACTION[want]
                 if sym in extra and want != "FLAT":
@@ -315,42 +368,7 @@ async def run_cycle(api, cfg: dict, dry_run: bool = False, now_ms: int | None = 
                     emit(close_rec)
                     rec = None
                 if want != "FLAT":
-                    # ── 開倉：站上均線做多／（多空模式）跌破均線做空 ──
-                    rec = {**base}
-                    if locks.get(sym) == want:
-                        rec["action"] = "wait"
-                        rec["note"] = ("停利／停損後等待中：收盤"
-                                       f"{'站回' if want == 'SHORT' else '跌破'}均線後才會再進場")
-                    elif sym in extra:
-                        rec["action"] = "skip"
-                        rec["note"] = f"已掉出成交量前 {cfg['top_volume']} 名：平倉後不再開新倉"
-                    elif not allow_buy:
-                        rec["action"] = "skip"
-                        rec["note"] = "已暫停（儀表板），不開新倉"
-                    else:
-                        price = await api.get_ticker_price(sym)
-                        step, min_notional = symbol_filters(await api.get_symbol_info(sym))
-                        budget = float((cfg.get("symbol_capital") or {}).get(sym, per_symbol))
-                        qty = fit_qty(budget * lev, price, step)
-                        if avail is None:
-                            avail = await available_usdt(api)
-                        if qty * price < min_notional:
-                            rec["action"] = "skip"
-                            rec["note"] = f"金額 {budget:.2f}U 低於最小下單 {min_notional}U"
-                        elif qty * price / lev > avail:
-                            rec["action"] = "skip"
-                            rec["note"] = f"可用餘額 {avail:.2f}U 不足 {qty * price / lev:.2f}U"
-                        else:
-                            rec.update(action="buy" if want == "LONG" else "short", qty=qty, price=price)
-                            avail -= qty * price / lev
-                            if not dry_run:
-                                await api.set_margin_type(sym, cfg["margin_type"])
-                                await api.set_leverage(sym, lev)
-                                await api.futures_market_order(sym, "BUY" if want == "LONG" else "SELL", qty)
-                                if tracker is not None:
-                                    tracker.record_open({"bot_id": "futures", "mode": "futures", "symbol": sym,
-                                                         "side": want, "entry_price": price, "quantity": qty,
-                                                         "strategy": STRATEGY_NAME[mode]})
+                    rec = await open_new(sym, base, want, lev)
         except Exception as e:  # noqa: BLE001 — 單一標的失敗不影響其他標的
             rec = {**base, "action": "error", "note": str(e)}
             logger.error("%s 判斷／下單失敗: %s", sym, e)
@@ -401,6 +419,7 @@ async def amain(args):
     universe = f"成交量前 {cfg['top_volume']} 名（每次判斷前更新）" if int(cfg["top_volume"] or 0) > 0 else cfg["symbols"]
     side_txt = "多空都做" if cfg.get("mode") == "ls" else "只做多"
     side_txt += f"，空單停利 {float(cfg['take_profit_short_pct']):g}%" if cfg.get("take_profit_short_pct") else ""
+    side_txt += "（停利後立刻重新進場）" if cfg.get("take_profit_short_pct") and not cfg.get("lock_after_take_profit", True) else ""
     side_txt += f"，停損 {float(cfg['stop_loss_pct']):g}%" if cfg.get("stop_loss_pct") else ""
     logger.info("日線均線機器人（%s%s）：%s，%s，均線 %d 天，投入 %.0fU，%dx",
                 mode, "・只看不下單" if args.dry_run else "", universe, side_txt,
@@ -422,7 +441,7 @@ async def amain(args):
             from src.web.app import create_app
             server = await _start_web(create_app(tracker=tracker), wcfg)
         last: dict[str, dict] = {}
-        locks = load_locks()
+        locks = load_locks(drop_legacy=not cfg.get("lock_after_take_profit", True))
         while True:
             paused = dash.state.bots[dash.BOT_ID].paused
             try:

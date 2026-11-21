@@ -115,7 +115,7 @@ async def amain(days: int):
         print(f"\n── 近 {days} 天幣安實際入帳：其他標的 ──")
         print("\n".join(_fmt_income(income["other"])))
 
-        locks = load_locks()
+        locks = load_locks(drop_legacy=not cfg.get("lock_after_take_profit", True))
         print(f"\n── 策略比對（最新已收盤日 K vs {sma_days} 日均線，日 K 於台灣 08:00 收盤）──")
         for sym in syms:
             kl = cache.get(sym) or await api.get_klines(sym, "1d", limit=sma_days + 5)
