@@ -581,7 +581,7 @@ class TestTakeProfitStopLoss(unittest.TestCase):
         rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
         self.assertEqual(rows[0]["action"], "sl_cover")
         self.assertIn("停損", rows[0]["note"])
-        self.assertEqual(locks, {"BTCUSDT": "SHORT"})
+        self.assertEqual(locks, {"BTCUSDT": "SHORT@sl"})
 
     def test_long_stop_loss(self):
         pos = [{"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.7, "entry_price": 15, "leverage": 1}]
@@ -590,7 +590,7 @@ class TestTakeProfitStopLoss(unittest.TestCase):
         rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
         self.assertEqual(rows[0]["action"], "sl_sell")
         api.futures_market_order.assert_awaited_once_with("BTCUSDT", "SELL", 0.7, reduce_only=True)
-        self.assertEqual(locks, {"BTCUSDT": "LONG"})
+        self.assertEqual(locks, {"BTCUSDT": "LONG@sl"})
 
     def test_no_exit_within_thresholds(self):
         api = _api(closes=self.DOWN, positions=self._short(9))                      # +11%：繼續抱
@@ -640,3 +640,80 @@ class TestTakeProfitStopLoss(unittest.TestCase):
         api = _api(closes=self.UP)                                                  # OLD 也用同一份 K 線：已站回均線
         asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
         self.assertNotIn("OLDUSDT", locks)
+
+
+class TestReenterAfterTakeProfit(unittest.TestCase):
+    """2026-11-21：停利後不等待 —— 條件仍成立就立刻用現價重新進場；停損後照樣等待"""
+
+    C = {**CFG, "mode": "ls", "symbols": ["BTCUSDT"], "capital_usdt": 100.0,
+         "take_profit_short_pct": 20, "stop_loss_pct": 20, "lock_after_take_profit": False}
+    DOWN = (10, 10, 10, 10, 8, 1)
+
+    def _short(self, entry, lev=1):
+        return [{"symbol": "BTCUSDT", "side": "SHORT", "quantity": 0.7, "entry_price": entry, "leverage": lev}]
+
+    def test_tp_then_reshort_same_cycle(self):
+        locks = {}
+        api = _api(closes=self.DOWN, positions=self._short(10))
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": "1000"})
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
+        self.assertEqual([r["action"] for r in rows], ["tp_cover", "short"])
+        self.assertIn("立刻重新進場", rows[0]["note"])
+        orders = [(c.args[1], c.args[2], c.kwargs.get("reduce_only", False))
+                  for c in api.futures_market_order.await_args_list]
+        self.assertEqual(orders, [("BUY", 0.7, True), ("SELL", 1.0, False)])       # 先回補、再用現價開新空單
+        self.assertEqual(locks, {})
+
+    def test_reentry_uses_new_leverage(self):
+        cfg = {**self.C, "leverage": 2, "also_own_leverages": [1]}
+        api = _api(closes=self.DOWN, positions=self._short(10, lev=1))
+        api.client.futures_account = AsyncMock(return_value={"availableBalance": "1000"})
+        rows = asyncio.run(bot.run_cycle(api, cfg, now_ms=NOW, locks={}))
+        self.assertEqual((rows[1]["action"], rows[1]["qty"]), ("short", 2.0))       # 舊 1 倍單停利後以 2 倍重開
+        api.set_leverage.assert_awaited_with("BTCUSDT", 2)
+
+    def test_stop_loss_still_waits(self):
+        locks = {}
+        api = _api(closes=self.DOWN, positions=self._short(6.5))                    # -23%
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, locks=locks))
+        self.assertEqual([r["action"] for r in rows], ["sl_cover"])
+        self.assertEqual(locks, {"BTCUSDT": "SHORT@sl"})
+        api2 = _api(closes=self.DOWN)                                               # 停損後仍在均線下 → 等待
+        self.assertEqual(asyncio.run(bot.run_cycle(api2, self.C, now_ms=NOW, locks=locks))[0]["action"], "wait")
+
+    def test_paused_tp_does_not_reopen(self):
+        api = _api(closes=self.DOWN, positions=self._short(10))
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, allow_buy=False, locks={}))
+        self.assertEqual([r["action"] for r in rows], ["tp_cover", "skip"])
+
+    def test_dry_run_places_nothing(self):
+        api = _api(closes=self.DOWN, positions=self._short(10))
+        rows = asyncio.run(bot.run_cycle(api, self.C, now_ms=NOW, dry_run=True, locks={}))
+        self.assertEqual([r["action"] for r in rows], ["tp_cover", "short"])
+        api.futures_market_order.assert_not_awaited()
+
+    def test_tp_locks_dropped_sl_locks_kept(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "state.json"
+            bot.save_locks({"ETHUSDT": "SHORT", "SOLUSDT": "SHORT@sl"}, f)          # 停利留下的、停損留下的
+            self.assertEqual(bot.load_locks(f), {"ETHUSDT": "SHORT", "SOLUSDT": "SHORT@sl"})
+            self.assertEqual(bot.load_locks(f, drop_tp=True), {"SOLUSDT": "SHORT@sl"})
+        self.assertEqual(bot.lock_side("SHORT@sl"), "SHORT")
+        self.assertIsNone(bot.lock_side(None))
+
+
+class TestTopNReentry(unittest.TestCase):
+    _run = TestTopNTakeProfit._run
+
+    def test_no_lock_stays_short_and_pays_fees(self):
+        import numpy as np
+        down = list(np.linspace(30, 10, 200))
+        base = self._run(down)
+        lock = self._run(down, tp=0.2)
+        free = self._run(down, tp=0.2, tp_lock=False)
+        self.assertGreater(free.tp_exits, lock.tp_exits)            # 重新進場後還能再停利
+        self.assertGreater(free.daily.sum(), lock.daily.sum())      # 一路跌：不等待賺得比等待多
+        self.assertLess(free.daily.sum(), base.daily.sum())         # 但比完全不停利多付手續費
+        self.assertAlmostEqual(base.daily.sum() - free.daily.sum(), free.tp_exits * 2 * 0.0004, places=6)
