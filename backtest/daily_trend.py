@@ -223,7 +223,8 @@ class TopNResult(Result):
 def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
              top_n: int, sma_days: int = 50, mode: str = "long",
              tp: float | None = None, tp_sides: str = "short",
-             sl: float | None = None, lev: float = 1.0, tp_lock: bool = True) -> TopNResult:
+             sl: float | None = None, lev: float = 1.0, tp_lock: bool = True,
+             tp_cooldown: int | None = None, tp_reentry_drop: float | None = None) -> TopNResult:
     """與實盤一致：每幣固定 1/top_n 資金；收盤站上均線且當天在前 N 名 → 買進；
     已持有者不論是否掉出前 N 名，收盤跌破均線才賣（掉出名單不強制賣）。
     mode="ls"：另外在收盤跌破均線且當天在前 N 名時做空，收盤站回均線才回補（同日可多翻空）。
@@ -232,7 +233,10 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     sl：收盤虧損達 sl 就停損出場（多空都適用），之後同樣要等收盤回到均線另一側才允許同方向再進場
     lev：槓桿（每幣名目 = lev / top_n）；lev > 1 時，收盤逆向達 0.9 / lev 視為逐倉強平出場
     tp_lock=False：停利後不等待，當天條件仍成立就以收盤價重新進場（多付一次平倉＋開倉手續費，
-        停損／再次停利改從新的進場價起算）"""
+        停損／再次停利改從新的進場價起算）
+    tp_cooldown：空單停利後滿這麼多天，就提前解除等待（仍須在均線下、在名單內才會再空）
+    tp_reentry_drop：空單停利後，收盤比停利當天收盤再低這個比例（例 0.1＝10%）就提前解除等待
+        兩者都只作用於「停利」留下的等待；停損的等待不變"""
     c = closes.to_numpy(float)
     sma = closes.rolling(sma_days, min_periods=sma_days).mean().to_numpy(float)
     u = uni.reindex_like(closes).fillna(False).to_numpy(bool)
@@ -245,6 +249,8 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     shorts = up50 = up90 = tp_exits = sl_exits = liqs = 0
     lock_short, lock_long = np.zeros(N, bool), np.zeros(N, bool)
     extra_turn = np.zeros((T, N))                                           # 停利後同日重新進場的額外換手
+    tp_wait = np.zeros(N, bool)                                             # 目前的空單等待是停利留下的
+    tp_day, tp_px = np.zeros(N), np.full(N, np.nan)
     for t in range(T):
         fin = np.isfinite(c[t])
         ok = fin & np.isfinite(sma[t])
@@ -257,6 +263,15 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
         exit_short = (cur == -1) & (~fin | (ok & ~below))                   # 站回均線（或下市）→ 回補
         lock_short &= below                                                 # 收盤回到均線上（或等於）→ 解除
         lock_long &= above
+        if tp_cooldown or tp_reentry_drop:
+            early = np.zeros(N, bool)
+            if tp_cooldown:
+                early |= tp_wait & (t - tp_day >= tp_cooldown)
+            if tp_reentry_drop:
+                with np.errstate(invalid="ignore"):
+                    early |= tp_wait & fin & (c[t] <= tp_px * (1 - tp_reentry_drop))
+            lock_short &= ~early
+            tp_wait &= lock_short
         if tp:
             with np.errstate(invalid="ignore"):
                 tp_s = (cur == -1) & below & (c[t] <= entry_px * (1 - tp))
@@ -266,6 +281,9 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
             if tp_lock:
                 lock_short |= tp_s
                 lock_long |= tp_l
+                tp_wait |= tp_s
+                tp_day = np.where(tp_s, t, tp_day)
+                tp_px = np.where(tp_s, c[t], tp_px)
             exit_short |= tp_s
             exit_long |= tp_l
         if sl or lev > 1:
@@ -281,6 +299,7 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
             sl_exits += int(sl_s.sum()) + int(sl_l.sum())
             lock_short |= (sl_s | liq_s) & below
             lock_long |= (sl_l | liq_l) & above
+            tp_wait &= ~(sl_s | liq_s)
             exit_short |= sl_s | liq_s
             exit_long |= sl_l | liq_l
         for j in np.where(exit_short)[0]:
@@ -513,6 +532,51 @@ def topn_reentry_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.Da
     return "\n".join(L)
 
 
+MID_VARIANTS = [("停利後等 5 天", {"tp_cooldown": 5}), ("停利後等 10 天", {"tp_cooldown": 10}),
+                ("再跌 10% 才進場", {"tp_reentry_drop": 0.10})]
+
+
+def topn_mid_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFrame, top_n: int,
+                    tp: float = 0.20, sl: float = 0.20) -> str:
+    """事先定好：停利後的三種折衷（等 5 天、等 10 天、再跌 10% 才進場）vs 現行（等收盤站回均線）；
+    要採用必須在 1 倍與 2 倍下，年化、最大回撤、夏普三項都優於現行"""
+    uni = topn_universe(closes, qvol, top_n)
+    start = uni.any(axis=1).idxmax()
+    closes, funding, uni = closes.loc[start:], funding.loc[start:], uni.loc[start:]
+    run = lambda **kw: topn_sma(closes, funding, uni, top_n, mode="ls", tp=tp, sl=sl, **kw)   # noqa: E731
+    L = [f"# 日線 50 均線 × 成交量前 {top_n} 名（多空）：停利後多久能再進場", "",
+         f"空單停利 {tp:.0%}、停損 {sl:.0%} 不變。現行：停利後等收盤站回均線才允許再空。"
+         "折衷：滿足條件就提前解除等待（仍須收盤在均線下、在名單內才會再空）；停損後的等待不變。"
+         "要採用必須在 1 倍與 2 倍下，年化、最大回撤、夏普三項都優於現行。", "",
+         f"資料：{closes.index[0]:%Y-%m-%d} ~ {closes.index[-1]:%Y-%m-%d}；候選池 {closes.shape[1]} 個幣", "", "```"]
+    wins = {name: 0 for name, _ in MID_VARIANTS}
+    yearly = {}
+    for lev in (1.0, 2.0):
+        base = run(lev=lev)
+        b = _metrics(base)
+        L.append(f"  {lev:g} 倍 現行（等站回均線）   {_stats(base)} | 停利 {base.tp_exits} 次、停損 {base.sl_exits} 次")
+        L.append(f"  {lev:g} 倍 立刻重新進場       {_stats(run(lev=lev, tp_lock=False))}")
+        yearly[f"{lev:g} 倍 現行"] = base
+        for name, kw in MID_VARIANTS:
+            r = run(lev=lev, **kw)
+            m = _metrics(r)
+            better = (m[0] > b[0]) + (m[1] < b[1]) + (m[2] > b[2])
+            wins[name] += better == 3
+            yearly[f"{lev:g} 倍 {name}"] = r
+            L.append(f"  {lev:g} 倍 {name:<12} {_stats(r)} | 停利 {r.tp_exits} 次、停損 {r.sl_exits} 次 | "
+                     f"三項中 {better} 項優於現行")
+        L.append("")
+    L.append("  逐年（組合報酬，2 倍）")
+    cols = [(k, v) for k, v in yearly.items() if k.startswith("2 倍")]
+    for y in sorted({d.year for d in cols[0][1].daily.index}):
+        sel = cols[0][1].daily.index.year == y
+        L.append(f"    {y}  " + "   ".join(f"{n[4:]} {((1 + r.daily[sel]).prod() - 1) * 100:+.1f}%" for n, r in cols))
+    passed = [n for n, k in wins.items() if k == 2]
+    L += ["", "  結論：" + ("、".join(passed) + " 在兩種槓桿下三項都優於現行" if passed
+                          else "沒有任何折衷版本在兩種槓桿下三項都優於現行 → 維持現行"), "```"]
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description="日線長期順勢驗證")
     ap.add_argument("--months", type=int, default=86)
@@ -525,6 +589,7 @@ def main():
     ap.add_argument("--tp", action="store_true", help="與 --top-symbols 併用：多空版要不要加停利")
     ap.add_argument("--sl", action="store_true", help="與 --top-symbols 併用：2 倍槓桿 + 空單停利下的停損幅度")
     ap.add_argument("--reentry", action="store_true", help="與 --top-symbols 併用：停利後要不要等待")
+    ap.add_argument("--mid", action="store_true", help="與 --top-symbols 併用：停利後多久能再進場（折衷版本）")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -535,7 +600,7 @@ def main():
         syms = sorted({x.strip().upper() for x in args.top_symbols.split(",") if x.strip()} | set(DEV))
         closes, funding, qvol = daily_panel(syms, args.months)
         closes = closes.dropna(axis=1, how="all")
-        md = (topn_reentry_report if args.reentry else topn_sl_report if args.sl else topn_tp_report if args.tp
+        md = (topn_mid_report if args.mid else topn_reentry_report if args.reentry else topn_sl_report if args.sl else topn_tp_report if args.tp
               else topn_ls_report if args.ls else topn_report)(
             closes, funding.reindex(columns=closes.columns), qvol.reindex(columns=closes.columns), args.top_n)
         print(md)
