@@ -717,3 +717,24 @@ class TestTopNReentry(unittest.TestCase):
         self.assertGreater(free.daily.sum(), lock.daily.sum())      # 一路跌：不等待賺得比等待多
         self.assertLess(free.daily.sum(), base.daily.sum())         # 但比完全不停利多付手續費
         self.assertAlmostEqual(base.daily.sum() - free.daily.sum(), free.tp_exits * 2 * 0.0004, places=6)
+
+
+class TestTopNMidReentry(unittest.TestCase):
+    _run = TestTopNTakeProfit._run
+
+    def test_cooldown_and_further_drop_release_tp_wait(self):
+        import numpy as np
+        down = list(np.linspace(30, 10, 200))                        # 一路跌、從不站回均線
+        lock = self._run(down, tp=0.2)
+        cool = self._run(down, tp=0.2, tp_cooldown=5)
+        drop = self._run(down, tp=0.2, tp_reentry_drop=0.10)
+        self.assertEqual(lock.short_trades, 1)                       # 現行：停利後整段都不再空
+        self.assertGreater(cool.short_trades, 1)                     # 等 5 天後重新開空
+        self.assertGreater(drop.short_trades, 1)                     # 再跌 10% 後重新開空
+        self.assertGreater(cool.daily.sum(), lock.daily.sum())
+
+    def test_sl_wait_not_released_by_cooldown(self):
+        s = [30.0] * 60 + list(__import__("numpy").linspace(30, 10, 20)) + [10.0] * 15 + [12.5] * 30
+        a = self._run(s, tp=0.2, sl=0.10)
+        b = self._run(s, tp=0.2, sl=0.10, tp_cooldown=5, tp_reentry_drop=0.10)
+        self.assertEqual((a.sl_exits, a.short_trades), (b.sl_exits, b.short_trades))   # 停損的等待不受影響

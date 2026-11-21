@@ -28,7 +28,12 @@ jobs:
       - name: 驗證
         run: |
           D=$(date -u +%F); mkdir -p reports
-          if grep -q "top10-re" backtest/.daily-trend-trigger; then
+          if grep -q "top10-mid" backtest/.daily-trend-trigger; then
+            # 停利後多久能再進場：等 5／10 天、再跌 10% 才進場 vs 現行
+            ALL=$(python -m backtest.top_volume --top 100 --json)
+            PICK=$(python -c "import json,sys;from backtest.candidates import EXCLUDED;print(','.join(s for s in json.loads(sys.argv[1]) if s not in EXCLUDED))" "$ALL")
+            python -m backtest.daily_trend --months 72 --top-symbols "$PICK" --top-n 10 --mid --out reports/daily-trend-top10-mid-$D.md
+          elif grep -q "top10-re" backtest/.daily-trend-trigger; then
             # 停利後要不要等待：現行（等收盤回到均線另一側）vs 立刻重新進場
             ALL=$(python -m backtest.top_volume --top 100 --json)
             PICK=$(python -c "import json,sys;from backtest.candidates import EXCLUDED;print(','.join(s for s in json.loads(sys.argv[1]) if s not in EXCLUDED))" "$ALL")
