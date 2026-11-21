@@ -738,3 +738,28 @@ class TestTopNMidReentry(unittest.TestCase):
         a = self._run(s, tp=0.2, sl=0.10)
         b = self._run(s, tp=0.2, sl=0.10, tp_cooldown=5, tp_reentry_drop=0.10)
         self.assertEqual((a.sl_exits, a.short_trades), (b.sl_exits, b.short_trades))   # 停損的等待不受影響
+
+
+class TestTopNPyramid(unittest.TestCase):
+    _run = TestTopNTakeProfit._run
+
+    def test_short_add_once_and_average_entry(self):
+        import numpy as np
+        down = list(np.linspace(30, 10, 200))
+        base = self._run(down)
+        add = self._run(down, add_at=0.10)
+        self.assertEqual((base.adds, add.adds), (0, 1))              # 每張單最多加一次
+        self.assertEqual(add.max_held, 2)                            # 部位變 2 倍
+        self.assertGreater(add.daily.sum(), base.daily.sum())        # 一路跌：加碼賺更多
+        self.assertLess(add.daily.sum(), 2 * base.daily.sum())       # 但加碼前那段只有 1 倍
+
+    def test_long_add_only_with_both(self):
+        import numpy as np
+        up = list(np.linspace(10, 30, 200))
+        self.assertEqual(self._run(up, add_at=0.10).adds, 0)
+        self.assertEqual(self._run(up, add_at=0.10, add_sides="both").adds, 1)
+
+    def test_add_then_bounce_loses_more(self):
+        # 空在 10 → 跌到 8.9 加碼（平均價約 9.42）→ 反彈回 10.5：不加碼小虧，加碼後虧更多
+        s = [30.0] * 60 + [20.0] * 20 + [10.0] * 12 + [8.9] * 3 + [10.5] * 6
+        self.assertLess(self._run(s, add_at=0.10).daily.sum(), self._run(s).daily.sum())

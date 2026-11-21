@@ -218,13 +218,15 @@ class TopNResult(Result):
     tp_exits: int = 0                 # 停利出場次數
     sl_exits: int = 0                 # 停損出場次數
     liquidations: int = 0             # 逐倉強平次數（lev > 1）
+    adds: int = 0                     # 加碼次數
 
 
 def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
              top_n: int, sma_days: int = 50, mode: str = "long",
              tp: float | None = None, tp_sides: str = "short",
              sl: float | None = None, lev: float = 1.0, tp_lock: bool = True,
-             tp_cooldown: int | None = None, tp_reentry_drop: float | None = None) -> TopNResult:
+             tp_cooldown: int | None = None, tp_reentry_drop: float | None = None,
+             add_at: float | None = None, add_sides: str = "short") -> TopNResult:
     """與實盤一致：每幣固定 1/top_n 資金；收盤站上均線且當天在前 N 名 → 買進；
     已持有者不論是否掉出前 N 名，收盤跌破均線才賣（掉出名單不強制賣）。
     mode="ls"：另外在收盤跌破均線且當天在前 N 名時做空，收盤站回均線才回補（同日可多翻空）。
@@ -236,7 +238,10 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
         停損／再次停利改從新的進場價起算）
     tp_cooldown：空單停利後滿這麼多天，就提前解除等待（仍須在均線下、在名單內才會再空）
     tp_reentry_drop：空單停利後，收盤比停利當天收盤再低這個比例（例 0.1＝10%）就提前解除等待
-        兩者都只作用於「停利」留下的等待；停損的等待不變"""
+        兩者都只作用於「停利」留下的等待；停損的等待不變
+    add_at：持倉收盤獲利達此比例（例 0.1＝10%）時加碼一次，加同樣金額（部位變 2 倍），每張單最多一次；
+        進場價改為兩次的數量加權平均（等金額加碼＝調和平均），停利／停損／強平都從平均價起算。
+        add_sides："short" 只有空單加碼、"both" 多空都加碼"""
     c = closes.to_numpy(float)
     sma = closes.rolling(sma_days, min_periods=sma_days).mean().to_numpy(float)
     u = uni.reindex_like(closes).fillna(False).to_numpy(bool)
@@ -249,6 +254,7 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     shorts = up50 = up90 = tp_exits = sl_exits = liqs = 0
     lock_short, lock_long = np.zeros(N, bool), np.zeros(N, bool)
     extra_turn = np.zeros((T, N))                                           # 停利後同日重新進場的額外換手
+    size, adds = np.ones(N), 0                                              # 部位倍數（加碼後為 2）
     tp_wait = np.zeros(N, bool)                                             # 目前的空單等待是停利留下的
     tp_day, tp_px = np.zeros(N), np.full(N, np.nan)
     for t in range(T):
@@ -312,10 +318,19 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
         shorts += int(sell.sum())
         entry_px = np.where(buy | sell, c[t], entry_px)
         worst = np.where(sell, 1.0, worst)
+        if add_at:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                gain = np.where(cur == -1, 1 - c[t] / entry_px, np.where(cur == 1, c[t] / entry_px - 1, 0.0))
+                can = (size == 1) & fin & (np.nan_to_num(gain) >= add_at)
+                can &= (cur == -1) | ((cur == 1) if add_sides == "both" else False)
+                entry_px = np.where(can, 2 / (1 / entry_px + 1 / c[t]), entry_px)
+            size = np.where(can, 2.0, size)
+            adds += int(can.sum())
+        size = np.where(buy | sell | (cur == 0), 1.0, size)                   # 新倉／空手：倍數歸 1
         cur = np.where(buy, 1.0, np.where(sell, -1.0, cur))
         if tp and not tp_lock:
             extra_turn[t] = 2.0 * ((tp_s & sell) | (tp_l & buy))
-        held[t] = cur
+        held[t] = cur * size
     for j in np.where(cur == -1)[0]:                                          # 期末仍持有的空單
         up50 += worst[j] >= 1.5
         up90 += worst[j] >= 1.9
@@ -332,7 +347,7 @@ def topn_sma(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame,
     exposure = np.abs(held).sum(axis=1)
     return TopNResult(monthly, contrib, daily, entries / weeks, float(exposure.mean()), int(exposure.max()),
                       float(per[side > 0].sum() * 100), float(per[side < 0].sum() * 100),
-                      shorts, int(up50), int(up90), tp_exits, sl_exits, liqs)
+                      shorts, int(up50), int(up90), tp_exits, sl_exits, liqs, adds)
 
 
 def topn_buy_hold(closes: pd.DataFrame, funding: pd.DataFrame, uni: pd.DataFrame, top_n: int) -> Result:
@@ -577,6 +592,54 @@ def topn_mid_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFr
     return "\n".join(L)
 
 
+ADD_VARIANTS = [("空單 +10% 加碼", {"add_at": 0.10, "add_sides": "short"}),
+                ("多空 +10% 都加碼", {"add_at": 0.10, "add_sides": "both"})]
+
+
+def topn_add_report(closes: pd.DataFrame, funding: pd.DataFrame, qvol: pd.DataFrame, top_n: int,
+                    tp: float = 0.20, sl: float = 0.20) -> str:
+    """事先定好：獲利達 10% 加碼一次（部位變 2 倍）vs 不加碼；
+    要採用必須在 1 倍與 2 倍下，年化、最大回撤、夏普三項都優於不加碼"""
+    uni = topn_universe(closes, qvol, top_n)
+    start = uni.any(axis=1).idxmax()
+    closes, funding, uni = closes.loc[start:], funding.loc[start:], uni.loc[start:]
+    run = lambda **kw: topn_sma(closes, funding, uni, top_n, mode="ls", tp=tp, sl=sl, **kw)   # noqa: E731
+    L = [f"# 日線 50 均線 × 成交量前 {top_n} 名（多空）：獲利後加碼", "",
+         f"空單停利 {tp:.0%}、停損 {sl:.0%}、停利後等待，都不變。加碼：持倉收盤獲利達 10% 時加同樣金額一次"
+         "（部位變 2 倍，每張單最多一次），停利／停損改從平均進場價起算。"
+         "要採用必須在 1 倍與 2 倍下，年化、最大回撤、夏普三項都優於不加碼。"
+         "回測假設加碼時一定有足夠保證金。", "",
+         f"資料：{closes.index[0]:%Y-%m-%d} ~ {closes.index[-1]:%Y-%m-%d}；候選池 {closes.shape[1]} 個幣", "", "```"]
+    wins = {name: 0 for name, _ in ADD_VARIANTS}
+    cols = []
+    for lev in (1.0, 2.0):
+        base = run(lev=lev)
+        b = _metrics(base)
+        need = lambda r: r.max_held / top_n * 100                                # noqa: E731 — 保證金佔投入金額 %
+        L.append(f"  {lev:g} 倍 不加碼（現行）     {_stats(base)} | 停損 {base.sl_exits} 次、強平 {base.liquidations} 次"
+                 f" | 最多需保證金 {need(base):.0f}%")
+        if lev == 2.0:
+            cols.append(("不加碼", base))
+        for name, kw in ADD_VARIANTS:
+            r = run(lev=lev, **kw)
+            m = _metrics(r)
+            better = (m[0] > b[0]) + (m[1] < b[1]) + (m[2] > b[2])
+            wins[name] += better == 3
+            if lev == 2.0:
+                cols.append((name, r))
+            L.append(f"  {lev:g} 倍 {name:<12} {_stats(r)} | 加碼 {r.adds} 次、停損 {r.sl_exits} 次、"
+                     f"強平 {r.liquidations} 次 | 最多需保證金 {need(r):.0f}% | 三項中 {better} 項優於不加碼")
+        L.append("")
+    L.append("  逐年（組合報酬，2 倍）")
+    for y in sorted({d.year for d in cols[0][1].daily.index}):
+        sel = cols[0][1].daily.index.year == y
+        L.append(f"    {y}  " + "   ".join(f"{n} {((1 + r.daily[sel]).prod() - 1) * 100:+.1f}%" for n, r in cols))
+    passed = [n for n, k in wins.items() if k == 2]
+    L += ["", "  結論：" + ("、".join(passed) + " 在兩種槓桿下三項都優於不加碼" if passed
+                          else "沒有任何加碼版本在兩種槓桿下三項都優於不加碼 → 維持不加碼"), "```"]
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description="日線長期順勢驗證")
     ap.add_argument("--months", type=int, default=86)
@@ -590,6 +653,7 @@ def main():
     ap.add_argument("--sl", action="store_true", help="與 --top-symbols 併用：2 倍槓桿 + 空單停利下的停損幅度")
     ap.add_argument("--reentry", action="store_true", help="與 --top-symbols 併用：停利後要不要等待")
     ap.add_argument("--mid", action="store_true", help="與 --top-symbols 併用：停利後多久能再進場（折衷版本）")
+    ap.add_argument("--add", action="store_true", help="與 --top-symbols 併用：獲利後加碼")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -600,7 +664,7 @@ def main():
         syms = sorted({x.strip().upper() for x in args.top_symbols.split(",") if x.strip()} | set(DEV))
         closes, funding, qvol = daily_panel(syms, args.months)
         closes = closes.dropna(axis=1, how="all")
-        md = (topn_mid_report if args.mid else topn_reentry_report if args.reentry else topn_sl_report if args.sl else topn_tp_report if args.tp
+        md = (topn_add_report if args.add else topn_mid_report if args.mid else topn_reentry_report if args.reentry else topn_sl_report if args.sl else topn_tp_report if args.tp
               else topn_ls_report if args.ls else topn_report)(
             closes, funding.reindex(columns=closes.columns), qvol.reindex(columns=closes.columns), args.top_n)
         print(md)
