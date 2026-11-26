@@ -24,7 +24,8 @@ from src.daily_trend_bot import DEFAULTS, LOG_CSV, closed_closes, desired_side
 TW = timezone(timedelta(hours=8))
 DAY_MS = 86_400_000
 MATCH_MS = 15 * 60 * 1000
-BACKTEST_NOTE_LS = "回測（前 10 名多空都做，2021-01 ~ 2026-10）：月勝率 44%、平均每週開倉 4.4 次、年化 +4.3%、最大回撤 74.5%"
+BACKTEST_NOTE_LS = ("回測（前 10 名多空、停利 20%／停損 20%、2 倍，2021-01 ~ 2026-10）：月勝率 44%、"
+                    "年化約 +19~30%、最大回撤約 90% —— 停利後常有長時間不開單")
 BACKTEST_NOTE = "回測（前 10 名，2020-12 ~ 2026-09）：月勝率 37%、平均每週買進 2.3 次 —— 常常小虧、靠少數大漲賺"
 
 
@@ -137,6 +138,11 @@ def round_trips(orders: list[dict]) -> list[dict]:
             trips.append({"symbol": o["symbol"], "side": "空" if sign < 0 else "多", "entry": b, "exit": o,
                           "pnl": pnl, "pct": sign * (o["price"] / b["price"] - 1) * 100 if b["price"] else 0.0,
                           "days": (o["time"] - b["time"]) / DAY_MS})
+        else:
+            # 平倉單找不到對應的開倉：進場早於查詢區間 → 仍列出，損益用幣安回報的已實現損益
+            short = act in ("cover", "tp_cover", "sl_cover")
+            trips.append({"symbol": o["symbol"], "side": "空" if short else "多", "entry": None, "exit": o,
+                          "pnl": o["realized"] - o["commission"], "pct": None, "days": None})
     for b in open_.values():
         trips.append({"symbol": b["symbol"], "side": "空" if b["action"] == "short" else "多", "entry": b,
                       "exit": None, "pnl": None, "pct": None, "days": None})
@@ -222,7 +228,10 @@ async def amain(days: int, log_path: Path):
     for t in trips:
         e = t["entry"]
         o_txt, c_txt = ("空", "補") if t["side"] == "空" else ("買", "賣")
-        if t["exit"]:
+        if e is None:
+            L.append(f"   {t['symbol']:<12} {t['side']} （進場早於查詢區間）→ {_tw(t['exit']['time'])} {c_txt} "
+                     f"{t['exit']['price']:.6g}  {t['pnl']:+.2f}U")
+        elif t["exit"]:
             L.append(f"   {t['symbol']:<12} {t['side']} {_tw(e['time'])} {o_txt} {e['price']:.6g} → "
                      f"{_tw(t['exit']['time'])} {c_txt} {t['exit']['price']:.6g}  {t['pct']:+.2f}%  "
                      f"{t['pnl']:+.2f}U  持有 {t['days']:.1f} 天")
