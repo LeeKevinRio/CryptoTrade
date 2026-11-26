@@ -191,3 +191,18 @@ class TestAccountTradesClock(unittest.TestCase):
                  mock.patch("builtins.print") as pr:
                 asyncio.run(sa.amain(7, Path(d) / "none.csv"))
         self.assertIn("XUSDT 查詢失敗", pr.call_args_list[0].args[0])
+
+
+class TestCloseWithoutEntryInWindow(unittest.TestCase):
+    """2026-11-26：停利的單進場早於查詢區間，戰績裡完全沒列出"""
+
+    def test_orphan_close_is_listed_with_realized_pnl(self):
+        orders = [{"symbol": "SOLUSDT", "side": "BUY", "time": T0, "qty": 0.28, "quote": 19.32, "price": 69.0,
+                   "realized": 5.63, "commission": 0.01, "action": "tp_cover"},
+                  {"symbol": "PEPE", "side": "SELL", "time": T0, "qty": 10, "quote": 1, "price": 0.1,
+                   "realized": -0.5, "commission": 0.0, "action": "sell"}]
+        trips = {t["symbol"]: t for t in sa.round_trips(orders)}
+        self.assertIsNone(trips["SOLUSDT"]["entry"])
+        self.assertEqual(trips["SOLUSDT"]["side"], "空")
+        self.assertAlmostEqual(trips["SOLUSDT"]["pnl"], 5.62)
+        self.assertEqual(trips["PEPE"]["side"], "多")
